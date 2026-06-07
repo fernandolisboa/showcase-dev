@@ -204,11 +204,12 @@ func (c *Compose) Health(ctx context.Context, sessionID string) (bool, error) {
 }
 
 // composePS is the subset of `docker compose ps --format json` the health check
-// needs: per-container run state and healthcheck status.
+// needs: per-container run state, exit code, and healthcheck status.
 type composePS struct {
-	Service string `json:"Service"`
-	State   string `json:"State"`  // running, exited, restarting, dead, created, paused
-	Health  string `json:"Health"` // healthy, unhealthy, starting, or "" (no healthcheck)
+	Service  string `json:"Service"`
+	State    string `json:"State"`    // running, exited, restarting, dead, created, paused
+	ExitCode int    `json:"ExitCode"` // process exit code once State == exited
+	Health   string `json:"Health"`   // healthy, unhealthy, starting, or "" (no healthcheck)
 }
 
 // parseComposePS tolerates both shapes Compose has emitted: a single JSON array,
@@ -241,19 +242,28 @@ func parseComposePS(out []byte) ([]composePS, error) {
 	return services, nil
 }
 
-// healthyFromPS decides Stack health from the container list: no containers means
-// the Stack is gone (unhealthy); otherwise every container must be running and not
-// report an unhealthy/starting healthcheck. "starting" counts as not-yet-healthy
-// so a flapping restart reads as unhealthy and the reaper's grace window decides.
+// healthyFromPS decides Stack health from the container list. No containers means
+// the Stack is gone (unhealthy). A running container is healthy unless its
+// healthcheck says otherwise ("unhealthy"/"starting" — the latter counts as
+// not-yet-healthy so a flapping restart reads unhealthy and the grace window
+// decides). A container that has exited 0 is a completed one-shot (e.g. the
+// run-contract's seed step, Restart: "no") and is fine; any other non-running
+// state — a nonzero exit, restarting, dead, etc. — is a crash.
 func healthyFromPS(services []composePS) bool {
 	if len(services) == 0 {
 		return false
 	}
 	for _, s := range services {
-		if s.State != "running" {
-			return false
-		}
-		if s.Health == "unhealthy" || s.Health == "starting" {
+		switch s.State {
+		case "running":
+			if s.Health == "unhealthy" || s.Health == "starting" {
+				return false
+			}
+		case "exited":
+			if s.ExitCode != 0 {
+				return false
+			}
+		default: // restarting, dead, created, paused, removing…
 			return false
 		}
 	}

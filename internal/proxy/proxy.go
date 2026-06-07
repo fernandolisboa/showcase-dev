@@ -147,6 +147,7 @@ func (r *Registry) sessionIDFromHost(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
+	host = strings.ToLower(host) // hostnames are case-insensitive; ids are lowercase
 	rest, ok := strings.CutSuffix(host, ".run."+r.domain)
 	if !ok {
 		return ""

@@ -154,7 +154,9 @@ func (r *Reaper) tick(ctx context.Context) {
 		}
 
 		// A terminal route's Stack is already gone; keep it only long enough for the
-		// Guest's page to show the failure message, then drop it.
+		// Guest's page to show the failure message, then drop it. The linger is timed
+		// from when the reaper first observes the terminal route (so up to one extra
+		// scan interval) — erring longer only helps the Guest see the message.
 		if route.State.Terminal() {
 			if clock.failedSince.IsZero() {
 				clock.failedSince = now

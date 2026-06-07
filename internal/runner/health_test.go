@@ -61,8 +61,10 @@ func TestHealthyFromPS(t *testing.T) {
 		{"all running, mix of healthy and no-healthcheck", []composePS{
 			{State: "running", Health: "healthy"}, {State: "running", Health: ""}}, true},
 		{"empty means stack gone", nil, false},
-		{"a container exited", []composePS{
-			{State: "running", Health: "healthy"}, {State: "exited", Health: ""}}, false},
+		{"completed one-shot (seed) exited 0 is fine", []composePS{
+			{State: "running", Health: "healthy"}, {State: "exited", ExitCode: 0}}, true},
+		{"a container crashed (exited nonzero)", []composePS{
+			{State: "running", Health: "healthy"}, {State: "exited", ExitCode: 137}}, false},
 		{"a container restarting", []composePS{{State: "restarting", Health: ""}}, false},
 		{"unhealthy healthcheck", []composePS{{State: "running", Health: "unhealthy"}}, false},
 		{"still starting", []composePS{{State: "running", Health: "starting"}}, false},
