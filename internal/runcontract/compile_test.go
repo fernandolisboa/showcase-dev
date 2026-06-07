@@ -105,7 +105,7 @@ func TestCompileDBService(t *testing.T) {
 	if db.Healthcheck == nil {
 		t.Error("db must have a healthcheck to gate readiness")
 	}
-	if len(db.Volumes) != 1 || db.Volumes[0] != "s-abc123-pgdata:/var/lib/postgresql/data" {
+	if len(db.Volumes) != 1 || db.Volumes[0].Source != "s-abc123-pgdata" || db.Volumes[0].Target != "/var/lib/postgresql/data" {
 		t.Errorf("db volume = %v", db.Volumes)
 	}
 	if len(plan.Volumes) != 1 || plan.Volumes[0].Name != "s-abc123-pgdata" {

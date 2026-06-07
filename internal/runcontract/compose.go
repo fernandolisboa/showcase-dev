@@ -33,9 +33,18 @@ func (p ExecutionPlan) ToCompose() ([]byte, error) {
 			SecurityOpt: s.SecurityOpt,
 			Restart:     s.Restart,
 			Environment: s.Env,
-			Volumes:     s.Volumes,
 			Networks:    s.Networks,
 			Command:     s.Command,
+		}
+		// Long-form volume syntax (type: volume) so a source can never be parsed
+		// as a host bind mount — the structural backstop for the no-bind-mounts
+		// invariant (ADR-0003), independent of any source-name validation.
+		for _, v := range s.Volumes {
+			cs.Volumes = append(cs.Volumes, composeVolumeMount{
+				Type:   "volume",
+				Source: v.Source,
+				Target: v.Target,
+			})
 		}
 		if len(s.DependsOn) > 0 {
 			cs.DependsOn = make(map[string]composeDependency, len(s.DependsOn))
@@ -77,11 +86,20 @@ type composeService struct {
 	SecurityOpt []string                     `yaml:"security_opt,omitempty"`
 	Restart     string                       `yaml:"restart,omitempty"`
 	Environment map[string]string            `yaml:"environment,omitempty"`
-	Volumes     []string                     `yaml:"volumes,omitempty"`
+	Volumes     []composeVolumeMount         `yaml:"volumes,omitempty"`
 	Networks    []string                     `yaml:"networks,omitempty"`
 	DependsOn   map[string]composeDependency `yaml:"depends_on,omitempty"`
 	Healthcheck *composeHealthcheck          `yaml:"healthcheck,omitempty"`
 	Command     []string                     `yaml:"command,omitempty"`
+}
+
+// composeVolumeMount is the long-form Compose volume mount. Emitting an explicit
+// `type: volume` (rather than the "source:target" short string) guarantees the
+// source is treated as a named volume and never as a host path / bind mount.
+type composeVolumeMount struct {
+	Type   string `yaml:"type"`
+	Source string `yaml:"source"`
+	Target string `yaml:"target"`
 }
 
 type composeDependency struct {

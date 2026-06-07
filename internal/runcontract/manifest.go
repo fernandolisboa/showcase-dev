@@ -81,6 +81,17 @@ type Seed struct {
 // supportedDBEngines are the engines the platform can provision in the MVP.
 var supportedDBEngines = map[string]bool{"postgres": true}
 
+// reservedServiceNames are the names the compiler generates for platform-owned
+// services (the trusted Postgres and the seed one-shot). An Owner service may
+// not use them: ToCompose keys services by name, so a collision would let an
+// Owner-controlled image silently overwrite a trusted platform service — the
+// "no untrusted code in trusted slots" invariant (ADR-0003). Validate rejects
+// them so the collision can never reach the renderer.
+var reservedServiceNames = map[string]bool{
+	dbServiceName:   true,
+	seedServiceName: true,
+}
+
 // Validate reports every problem with the Manifest at once (ADR-0003: the
 // platform builds strictly from an explicit, well-formed contract).
 func (m Manifest) Validate() error {
@@ -98,6 +109,8 @@ func (m Manifest) Validate() error {
 			errs = append(errs, fmt.Errorf("%s: name is required", where))
 		} else if seen[s.Name] {
 			errs = append(errs, fmt.Errorf("%s: duplicate service name", where))
+		} else if reservedServiceNames[s.Name] {
+			errs = append(errs, fmt.Errorf("%s: name is reserved for a platform service", where))
 		}
 		seen[s.Name] = true
 

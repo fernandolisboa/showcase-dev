@@ -29,6 +29,16 @@ type VolumeSpec struct {
 	Name string
 }
 
+// VolumeMount is a named-volume mount on a service. It is always rendered as
+// long-form Compose (`type: volume`), so Source names a platform-managed named
+// volume and can never be reinterpreted as a host path / bind mount (ADR-0003).
+type VolumeMount struct {
+	// Source is the named volume's name (must match a VolumeSpec.Name).
+	Source string
+	// Target is the in-container mount path.
+	Target string
+}
+
 // ServiceSpec is one fully-locked-down container.
 type ServiceSpec struct {
 	Name  string
@@ -49,8 +59,9 @@ type ServiceSpec struct {
 	ReadOnlyRootFS bool
 	// TmpFS are in-memory writable mounts for an otherwise read-only container.
 	TmpFS []string
-	// Volumes are named-volume mounts ("volume:/path"); never host bind mounts.
-	Volumes []string
+	// Volumes are named-volume mounts; always rendered as long-form Compose
+	// (type: volume) so a source can never be reinterpreted as a host bind mount.
+	Volumes []VolumeMount
 	// CapDrop drops Linux capabilities ("ALL").
 	CapDrop []string
 	// SecurityOpt carries hardening flags (e.g. no-new-privileges).

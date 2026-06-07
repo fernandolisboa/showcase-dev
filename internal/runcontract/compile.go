@@ -3,6 +3,7 @@ package runcontract
 import (
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 const (
@@ -11,6 +12,14 @@ const (
 	dbServiceName   = "db"
 	seedServiceName = "seed"
 )
+
+// safeNameRE bounds the platform-supplied Project / NetworkName to a strict
+// charset. Project flows into the compose project name, the network name, and
+// the DB volume source; without this guard a value like "/etc:/host" could be
+// concatenated into a volume string and reinterpreted by Compose as a host bind
+// mount (defeating the no-bind-mounts invariant, ADR-0003). Defense in depth:
+// long-form volume syntax (below) is the structural backstop; this is the gate.
+var safeNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 var (
 	defaultAppResources = Resources{MemoryBytes: 512 << 20, CPUs: 1.0, PidsLimit: 256}
@@ -60,6 +69,12 @@ func Compile(m Manifest, opts Options) (ExecutionPlan, error) {
 	if opts.Project == "" {
 		return ExecutionPlan{}, errors.New("options: project is required")
 	}
+	if !safeNameRE.MatchString(opts.Project) {
+		return ExecutionPlan{}, fmt.Errorf("options: project %q must match %s", opts.Project, safeNameRE)
+	}
+	if opts.NetworkName != "" && !safeNameRE.MatchString(opts.NetworkName) {
+		return ExecutionPlan{}, fmt.Errorf("options: networkName %q must match %s", opts.NetworkName, safeNameRE)
+	}
 
 	runtime := orDefault(opts.Runtime, defaultRuntime)
 	appUser := orDefault(opts.AppUser, defaultAppUser)
@@ -104,19 +119,25 @@ func Compile(m Manifest, opts Options) (ExecutionPlan, error) {
 		if !ok {
 			return ExecutionPlan{}, fmt.Errorf("options: no image for seed service %q", m.Seed.Service)
 		}
+		// The seed runs Owner-authored (untrusted, per ADR-0002) m.Seed.Command on
+		// the app image, so it gets the same hardening as app services — including
+		// a read-only rootfs + tmpfs. It writes to the DB over the network and to
+		// /tmp, never to its own rootfs.
 		plan.Services = append(plan.Services, ServiceSpec{
-			Name:        seedServiceName,
-			Image:       img,
-			Runtime:     runtime,
-			Resources:   appRes,
-			Networks:    []string{netName},
-			Env:         appEnv,
-			User:        appUser,
-			CapDrop:     []string{"ALL"},
-			SecurityOpt: []string{"no-new-privileges:true"},
-			Restart:     "no",
-			Command:     m.Seed.Command,
-			DependsOn:   map[string]DependCondition{dbServiceName: DependHealthy},
+			Name:           seedServiceName,
+			Image:          img,
+			Runtime:        runtime,
+			Resources:      appRes,
+			Networks:       []string{netName},
+			Env:            appEnv,
+			User:           appUser,
+			ReadOnlyRootFS: true,
+			TmpFS:          []string{"/tmp"},
+			CapDrop:        []string{"ALL"},
+			SecurityOpt:    []string{"no-new-privileges:true"},
+			Restart:        "no",
+			Command:        m.Seed.Command,
+			DependsOn:      map[string]DependCondition{dbServiceName: DependHealthy},
 		})
 	}
 
@@ -162,7 +183,7 @@ func dbService(db *DB, creds DBCreds, runtime string, res Resources, net, volume
 			"POSTGRES_PASSWORD": creds.Password,
 			"POSTGRES_DB":       creds.Database,
 		},
-		Volumes:     []string{volume + ":/var/lib/postgresql/data"},
+		Volumes:     []VolumeMount{{Source: volume, Target: "/var/lib/postgresql/data"}},
 		SecurityOpt: []string{"no-new-privileges:true"},
 		Restart:     "on-failure",
 		Healthcheck: &Healthcheck{

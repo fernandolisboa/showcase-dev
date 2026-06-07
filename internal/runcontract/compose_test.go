@@ -62,16 +62,25 @@ func TestComposeAbsentInvariants(t *testing.T) {
 		}
 	}
 
-	// Structural: no service mounts a host path (bind mount). Named volumes have
-	// no leading "/" or "./" on the source side.
+	// Structural: every volume is long-form type:volume (never a bind mount), and
+	// no source is a host path. Long-form removes the "source:target" string that
+	// Compose would otherwise split on ":" into a host bind.
 	services, _ := doc["services"].(map[string]any)
 	for name, raw := range services {
 		svc, _ := raw.(map[string]any)
 		vols, _ := svc["volumes"].([]any)
 		for _, v := range vols {
-			s, _ := v.(string)
-			if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") {
-				t.Errorf("service %q has a host bind mount %q (only named volumes allowed)", name, s)
+			vm, ok := v.(map[string]any)
+			if !ok {
+				t.Errorf("service %q volume %v is not long-form (type:volume) — short strings can be reparsed as host binds", name, v)
+				continue
+			}
+			if vm["type"] != "volume" {
+				t.Errorf("service %q volume type = %v, want volume (no bind mounts, ADR-0003)", name, vm["type"])
+			}
+			src, _ := vm["source"].(string)
+			if strings.HasPrefix(src, "/") || strings.HasPrefix(src, "./") || strings.HasPrefix(src, "../") {
+				t.Errorf("service %q has a host-path volume source %q (only named volumes allowed)", name, src)
 			}
 		}
 		if _, ok := svc["privileged"]; ok {
