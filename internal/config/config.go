@@ -26,9 +26,20 @@ type Config struct {
 	// BootingBackendURL is the address Traefik routes a booting Session to (the
 	// control-plane splash). Empty lets the caller derive a dev default.
 	BootingBackendURL string
-	// InternalPort is the Traefik-facing internal listener (dynamic config +
-	// splash); kept off the public app port (ADR-0004).
+	// InternalHost is the interface the Traefik-facing internal listeners (the
+	// /traefik config endpoint and the booting splash) bind to. It defaults to
+	// 127.0.0.1 so the control-plane surface is never published on a
+	// Session-reachable interface (ADR-0004). In prod Traefik is co-located on the
+	// same VM and reaches it over loopback; the dev Traefik runs in a container and
+	// must override this to the Docker bridge gateway (see README).
+	InternalHost string
+	// InternalPort is the config listener (Traefik's /traefik dynamic config);
+	// kept off the public app port (ADR-0004).
 	InternalPort int
+	// SplashPort is the booting-splash listener a Session is routed to while its
+	// Stack boots. It is a SEPARATE listener from InternalPort with NO /traefik
+	// route, so a Demo forwarded here can never read the backend map (ADR-0004).
+	SplashPort int
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -40,7 +51,9 @@ func Load() Config {
 		DatabaseURL:       getenv("DATABASE_URL", ""),
 		DemoDomain:        getenv("DEMO_DOMAIN", "localhost"),
 		BootingBackendURL: getenv("PROXY_BOOTING_URL", ""),
+		InternalHost:      getenv("INTERNAL_HOST", "127.0.0.1"),
 		InternalPort:      getenvInt("INTERNAL_PORT", 8081),
+		SplashPort:        getenvInt("SPLASH_PORT", 8082),
 	}
 }
 

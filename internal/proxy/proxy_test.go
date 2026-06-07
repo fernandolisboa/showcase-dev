@@ -98,7 +98,7 @@ func TestBuildLiveSameOriginRouting(t *testing.T) {
 	if ui.Rule != "Host(`s-abc.run.demo.app`)" {
 		t.Errorf("ui rule = %q", ui.Rule)
 	}
-	if api.Rule != "Host(`s-abc.run.demo.app`) && PathPrefix(`/api`)" {
+	if api.Rule != "Host(`s-abc.run.demo.app`) && (Path(`/api`) || PathPrefix(`/api/`))" {
 		t.Errorf("api rule = %q", api.Rule)
 	}
 	if !(api.Priority > ui.Priority) {
@@ -113,6 +113,27 @@ func TestBuildLiveSameOriginRouting(t *testing.T) {
 	// A live Session needs no booting service.
 	if _, present := cfg.HTTP.Services[bootingService]; present {
 		t.Error("no booting service expected for a fully-live config")
+	}
+}
+
+// TestAPIPathRuleMatchesSegmentNotPrefix is the m1 regression: PathPrefix(`/api`)
+// is a raw string prefix that wrongly swallows `/apidocs`/`/apiary`. The rule must
+// match only the `/api` segment (Path) and its subpaths (PathPrefix with a
+// trailing slash), so a sibling UI route like `/apiary` falls through to the UI.
+func TestAPIPathRuleMatchesSegmentNotPrefix(t *testing.T) {
+	got := apiPathRule("/api")
+	want := "(Path(`/api`) || PathPrefix(`/api/`))"
+	if got != want {
+		t.Fatalf("apiPathRule(/api) = %q, want %q", got, want)
+	}
+	// A raw-prefix sibling must NOT be expressible as a subpath of /api: the rule
+	// only matches `/api` exactly or `/api/...`, never `/apidocs` or `/apiary`.
+	if strings.Contains(got, "PathPrefix(`/api`)") {
+		t.Error("rule still uses the raw string prefix PathPrefix(`/api`) — /apidocs would match")
+	}
+	// A declared trailing slash collapses to the same rule (no double slash).
+	if slashed := apiPathRule("/api/"); slashed != want {
+		t.Errorf("apiPathRule(/api/) = %q, want %q", slashed, want)
 	}
 }
 
@@ -146,10 +167,10 @@ func TestSplashHandler(t *testing.T) {
 	}
 }
 
-func TestInternalHandler(t *testing.T) {
+func TestConfigListenerServesConfigAndSplash(t *testing.T) {
 	reg := NewRegistry("demo.app")
 	reg.Add("abc", Backend{URL: "http://web:8080"}, nil)
-	h := InternalHandler(reg, "http://control/booting", "web")
+	h := ConfigListenerHandler(reg, "http://control/booting", "web")
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/traefik", nil))
@@ -160,6 +181,37 @@ func TestInternalHandler(t *testing.T) {
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/anything/at/all", nil))
 	if !strings.Contains(rec.Body.String(), "Starting your demo") {
-		t.Error("non-/traefik paths must serve the booting splash")
+		t.Error("non-/traefik paths on the config listener must serve the booting splash")
+	}
+}
+
+// TestBootingListenerNeverServesBackendMap is the B1 (ADR-0004) regression test:
+// the splash surface a booting Session is forwarded to must return the splash for
+// EVERY path — including /traefik — never the control-plane backend map. Traefik
+// forwards the Guest's full path here, so a compromised Demo asking for /traefik
+// must not be able to read the dynamic config.
+func TestBootingListenerNeverServesBackendMap(t *testing.T) {
+	// A Live Session whose backend URL must never leak through the splash surface.
+	reg := NewRegistry("demo.app")
+	reg.Add("victim", Backend{URL: "http://secret-ui:8080"}, []Backend{{PathPrefix: "/api", URL: "http://secret-api:8080"}})
+	reg.Promote("victim")
+
+	h := BootingListenerHandler()
+
+	for _, path := range []string{"/traefik", "/", "/api", "/anything"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		body := rec.Body.String()
+		if !strings.Contains(body, "Starting your demo") {
+			t.Errorf("path %q on the booting surface must serve the splash, got %q", path, body)
+		}
+		if ct := rec.Header().Get("Content-Type"); strings.Contains(ct, "application/json") {
+			t.Errorf("path %q on the booting surface returned JSON config content-type %q — backend map leak (ADR-0004)", path, ct)
+		}
+		// The backend map must not appear in the body under any path.
+		if strings.Contains(body, "secret-ui") || strings.Contains(body, "secret-api") || strings.Contains(body, "loadBalancer") {
+			t.Errorf("path %q on the booting surface leaked the backend map: %q", path, body)
+		}
 	}
 }

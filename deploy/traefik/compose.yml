@@ -1,10 +1,18 @@
 # Run Traefik locally in front of booted Sessions (ADR-0004/0009).
 #
-# 1. Start the control plane on the host:  INTERNAL_PORT=8081 make run
+# 1. Start the control plane on the host, reachable from this container over the
+#    Docker bridge gateway. The control-plane internal listeners default to
+#    127.0.0.1 (so no Session can reach them in prod), so dev binds them to the
+#    gateway instead:
+#        INTERNAL_HOST=0.0.0.0 INTERNAL_PORT=8081 SPLASH_PORT=8082 make run
 # 2. Start Traefik:                          make proxy-up
 # 3. Boot a Session whose Runner is wired with WithProxy(registry, "showcase-traefik").
 #    It is then reachable at  http://s-<id>.run.localhost
 #    (*.localhost resolves to 127.0.0.1 in modern browsers and curl).
+#
+# The dashboard (:8080) is intentionally NOT published: api.insecure leaks every
+# Session's backend map to any container on the network (ADR-0004). Inspect routers
+# with `curl http://host.docker.internal:8081/traefik` from the host instead.
 #
 # The container_name below must match the name the Runner attaches to each
 # Session network (WithProxy's traefikContainer argument).
@@ -15,7 +23,6 @@ services:
     command: ["--configFile=/etc/traefik/traefik.yml"]
     ports:
       - "80:80"
-      - "8080:8080" # Traefik dashboard (dev only)
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
     extra_hosts:

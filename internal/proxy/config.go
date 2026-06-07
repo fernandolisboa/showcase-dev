@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // bootingService is the shared Traefik service every Booting Session routes to —
@@ -31,16 +32,30 @@ func (h *ConfigHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(h.build())
 }
 
-// InternalHandler builds the Traefik-facing surface: the dynamic-config endpoint
-// (HTTP provider) at GET /traefik, and the booting splash for every other path
-// (a booting Session is forwarded here regardless of the path the Guest asked
-// for). This must be bound to an internal interface only — a Demo must never
-// reach the control plane (ADR-0004).
-func InternalHandler(reg *Registry, bootingURL, entryPoint string) http.Handler {
+// ConfigListenerHandler is the control-plane-only surface that serves Traefik's
+// dynamic config (HTTP provider) at GET /traefik. Traefik polls it directly over
+// the host gateway; no Session is ever routed to this listener (a booting Session
+// goes to the splash listener instead). It must additionally bind an internal
+// interface only — a Demo must never reach the backend map (ADR-0004); see
+// cmd/controlplane's InternalHost.
+//
+// Any non-/traefik path still returns the splash rather than a 404, so this
+// listener's only extra surface beyond /traefik is the harmless booting page.
+func ConfigListenerHandler(reg *Registry, bootingURL, entryPoint string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /traefik", NewConfigHandler(reg, bootingURL, entryPoint))
 	mux.Handle("/", SplashHandler())
 	return mux
+}
+
+// BootingListenerHandler is the splash-only surface a booting Session is
+// forwarded to (bootingURL points here). It deliberately has NO /traefik route:
+// Traefik forwards the Guest's full request path, so a compromised Demo that
+// presents a booting Session's Host and asks for /traefik gets the splash, not
+// the control-plane backend map (ADR-0004). Keeping the splash on its own
+// listener — never the one that serves /traefik — is the structural wall.
+func BootingListenerHandler() http.Handler {
+	return SplashHandler()
 }
 
 // build renders the dynamic config for all active Sessions.
@@ -62,7 +77,7 @@ func (h *ConfigHandler) build() dynamicConfig {
 		// Live: each API prefix wins over the catch-all UI via higher priority.
 		for i, api := range rt.APIs {
 			name := fmt.Sprintf("s-%s-api-%d", rt.SessionID, i)
-			rule := fmt.Sprintf("%s && PathPrefix(`%s`)", hostRule, api.PathPrefix)
+			rule := fmt.Sprintf("%s && %s", hostRule, apiPathRule(api.PathPrefix))
 			routers[name] = h.router(rule, name, 100)
 			services[name] = serviceTo(api.URL)
 		}
@@ -88,6 +103,16 @@ func (h *ConfigHandler) router(rule, svc string, priority int) router {
 
 func serviceTo(url string) service {
 	return service{LoadBalancer: loadBalancer{Servers: []server{{URL: url}}}}
+}
+
+// apiPathRule matches an API mount on a path-segment boundary, not a raw string
+// prefix. Traefik's PathPrefix(`/api`) also matches `/apidocs`/`/apiary`, which
+// would wrongly swallow an Owner UI route; Path(`/api`) || PathPrefix(`/api/`)
+// matches only the `/api` segment and its subpaths. The prefix is trimmed of a
+// trailing slash first so a declared `/api/` and `/api` produce the same rule.
+func apiPathRule(prefix string) string {
+	p := strings.TrimRight(prefix, "/")
+	return fmt.Sprintf("(Path(`%s`) || PathPrefix(`%s/`))", p, p)
 }
 
 // --- Traefik dynamic-config wire format ---
