@@ -40,6 +40,14 @@ type Config struct {
 	// Stack boots. It is a SEPARATE listener from InternalPort with NO /traefik
 	// route, so a Demo forwarded here can never read the backend map (ADR-0004).
 	SplashPort int
+	// Runtime is the container runtime the Runner boots Sessions under: "runsc"
+	// (gVisor, prod) or "runc" (local dev where gVisor is absent) — ADR-0002/0009.
+	Runtime string
+	// TraefikContainer is the Traefik container the Runner attaches to each Session
+	// network so it can reach the live Stack (#9).
+	TraefikContainer string
+	// DemoScheme is the URL scheme for Session links ("http" dev, "https" prod).
+	DemoScheme string
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -54,6 +62,9 @@ func Load() Config {
 		InternalHost:      getenv("INTERNAL_HOST", "127.0.0.1"),
 		InternalPort:      getenvInt("INTERNAL_PORT", 8081),
 		SplashPort:        getenvInt("SPLASH_PORT", 8082),
+		Runtime:           getenv("RUNTIME", "runsc"),
+		TraefikContainer:  getenv("TRAEFIK_CONTAINER", "showcase-traefik"),
+		DemoScheme:        getenv("DEMO_SCHEME", "http"),
 	}
 }
 

@@ -11,14 +11,18 @@ import (
 	"github.com/fernandolisboa/showcase-dev/internal/web"
 )
 
-// New builds the control-plane HTTP handler.
-func New(logger *slog.Logger, _ config.Config) http.Handler {
+// New builds the control-plane HTTP handler. play, when non-nil, is the spin-up
+// API handler mounted at POST /api/play (#10).
+func New(logger *slog.Logger, _ config.Config, play http.Handler) http.Handler {
 	mux := http.NewServeMux()
 
 	// Liveness. Readiness (incl. the DB check) lands with the write-model slice.
 	mux.HandleFunc("GET /healthz", health)
 
-	// The control-plane API surface mounts under /api in later slices.
+	// Spin-up API: a Guest starts a Session — anonymous, no account (ADR-0008).
+	if play != nil {
+		mux.Handle("POST /api/play", play)
+	}
 
 	// Everything else is the embedded React SPA.
 	mux.Handle("/", web.Handler())

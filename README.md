@@ -68,10 +68,12 @@ is healthy, then the live Demo, with same-origin `/api`.
 ```bash
 # Dev only: bind the internal listeners to the bridge gateway so the Traefik
 # container (which reaches the host via host.docker.internal) can poll them.
-INTERNAL_HOST=0.0.0.0 INTERNAL_PORT=8081 SPLASH_PORT=8082 make run
+RUNTIME=runc DEMO_SCHEME=http \
+  INTERNAL_HOST=0.0.0.0 INTERNAL_PORT=8081 SPLASH_PORT=8082 make run
 make proxy-up                 # Traefik in front of Sessions (deploy/traefik/)
-# A booted Session (Runner wired with WithProxy(registry, "showcase-traefik")) is
-# then reachable at  http://s-<id>.run.localhost   (*.localhost -> 127.0.0.1)
+# Open http://localhost:8080/demo and press ▶ Play: the spin-up API starts a
+# Session and sends you to http://s-<id>.run.localhost — the booting page, then
+# the live Demo (*.localhost -> 127.0.0.1). Each visitor gets their own Session.
 make proxy-down
 ```
 

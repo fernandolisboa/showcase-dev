@@ -19,8 +19,14 @@ import (
 
 	"github.com/fernandolisboa/showcase-dev/internal/config"
 	"github.com/fernandolisboa/showcase-dev/internal/proxy"
+	"github.com/fernandolisboa/showcase-dev/internal/runner"
 	"github.com/fernandolisboa/showcase-dev/internal/server"
+	"github.com/fernandolisboa/showcase-dev/internal/session"
 )
+
+// fixtureProjectID is the single hand-configured Project the MVP plays (the
+// StaticSource ignores the id). Owner-configured Projects arrive with #19.
+const fixtureProjectID = "fixture"
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -69,9 +75,21 @@ func main() {
 		}()
 	}
 
+	// The Runner boots Sessions and keeps the proxy registry current; the session
+	// Manager turns a Guest "play" into a live Session asynchronously (#10). The MVP
+	// plays one hand-configured fixture Project.
+	sessions := session.NewManager(
+		runner.NewCompose(
+			runner.StaticSource{P: runner.FixtureProject()},
+			runner.WithRuntime(cfg.Runtime),
+			runner.WithProxy(registry, cfg.TraefikContainer),
+		),
+		registry, cfg.DemoScheme, logger,
+	)
+
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           server.New(logger, cfg),
+		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
