@@ -47,6 +47,18 @@ func TestMaxSessionsParsesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestMaxCachedImagesParsesAndDefaults(t *testing.T) {
+	t.Setenv("MAX_CACHED_IMAGES", "5")
+	if got := Load().MaxCachedImages; got != 5 {
+		t.Errorf("MaxCachedImages = %d, want 5", got)
+	}
+
+	t.Setenv("MAX_CACHED_IMAGES", "")
+	if got := Load().MaxCachedImages; got != 20 {
+		t.Errorf("MaxCachedImages = %d, want default 20", got)
+	}
+}
+
 func TestLoadReadsEnv(t *testing.T) {
 	t.Setenv("HOST", "127.0.0.1")
 	t.Setenv("PORT", "9090")

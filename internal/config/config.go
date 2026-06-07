@@ -72,6 +72,10 @@ type Config struct {
 	// FailureLinger is how long a Failed/Crashed Session's route is kept so the
 	// Guest's page lands on the failure message before the reaper removes it (#13).
 	FailureLinger time.Duration
+	// MaxCachedImages caps how many built Project images the builder keeps before
+	// LRU-evicting the coldest (ADR-0003). Image storage is cheap; this just bounds
+	// disk growth across many Projects/commits.
+	MaxCachedImages int
 	// MaxSessions is the global cap on concurrent Sessions (ADR-0006), sized to host
 	// capacity ÷ per-Session budget (ADR-0002). At the cap a play request is
 	// rejected with an "at capacity" response rather than queued. A value <= 0
@@ -101,6 +105,7 @@ func Load() Config {
 		TraefikMetricsURL: getenv("TRAEFIK_METRICS_URL", "http://127.0.0.1:8084/metrics"),
 		CrashGrace:        getenvDuration("CRASH_GRACE", 30*time.Second),
 		FailureLinger:     getenvDuration("FAILURE_LINGER", 2*time.Minute),
+		MaxCachedImages:   getenvInt("MAX_CACHED_IMAGES", 20),
 		MaxSessions:       getenvInt("MAX_SESSIONS", 10),
 	}
 }

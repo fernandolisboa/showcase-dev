@@ -17,8 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fernandolisboa/showcase-dev/internal/builder"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
+	"github.com/fernandolisboa/showcase-dev/internal/fixture"
 	"github.com/fernandolisboa/showcase-dev/internal/proxy"
+	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 	"github.com/fernandolisboa/showcase-dev/internal/runner"
 	"github.com/fernandolisboa/showcase-dev/internal/server"
 	"github.com/fernandolisboa/showcase-dev/internal/session"
@@ -83,15 +86,47 @@ func main() {
 		}()
 	}
 
+	// The builder builds the Project's image(s) from source and caches them
+	// (ADR-0003); the BuildingSource swaps the built tags into the Project the
+	// Runner boots, replacing prebuilt refs. The MVP builds one in-repo fixture from
+	// its embedded Dockerfile; #19 will resolve real Owner repos via SpecFunc.
+	imageBuilder := builder.New(cfg.MaxCachedImages, logger)
+	fixtureVersion, err := fixture.Version()
+	if err != nil {
+		logger.Error("compute fixture version", "err", err)
+		os.Exit(1)
+	}
+	source := builder.NewBuildingSource(
+		runner.StaticSource{P: runner.FixtureProject()}, imageBuilder,
+		func(projectID string, svc runcontract.Service) (builder.BuildSpec, error) {
+			return builder.BuildSpec{
+				ImageName:  "showcase/" + projectID + "-" + svc.Name,
+				Version:    fixtureVersion,
+				Dockerfile: fixture.Dockerfile,
+				Context:    fixture.Extract,
+			}, nil
+		},
+		logger,
+	)
+
 	// The Runner boots Sessions and keeps the proxy registry current; the session
 	// Manager turns a Guest "play" into a live Session asynchronously (#10). The MVP
 	// plays one hand-configured fixture Project.
 	compose := runner.NewCompose(
-		runner.StaticSource{P: runner.FixtureProject()},
+		source,
 		runner.WithRuntime(cfg.Runtime),
 		runner.WithProxy(registry, cfg.TraefikContainer),
 	)
 	sessions := session.NewManager(compose, registry, cfg.DemoScheme, cfg.MaxSessions, logger)
+
+	// Warm the image cache at startup ("publish"): build now so a Guest's first play
+	// never waits on a build (ADR-0003). A failure is logged, not fatal — demos then
+	// surface "failed to start" (#13) until the build is fixed.
+	warmCtx, warmCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	if _, err := source.Project(warmCtx, fixtureProjectID); err != nil {
+		logger.Error("startup image build (publish) failed; demos will fail to start until fixed", "err", err)
+	}
+	warmCancel()
 
 	// The reaper tears Sessions down on idle, at the max-runtime cap, and on crash,
 	// and removes the lingering routes of failed Sessions (ADR-0006). Its idle
