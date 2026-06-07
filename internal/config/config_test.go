@@ -22,6 +22,18 @@ func TestTeardownTunablesParseAndDefault(t *testing.T) {
 	}
 }
 
+func TestMaxSessionsParsesAndDefaults(t *testing.T) {
+	t.Setenv("MAX_SESSIONS", "3")
+	if got := Load().MaxSessions; got != 3 {
+		t.Errorf("MaxSessions = %d, want 3", got)
+	}
+
+	t.Setenv("MAX_SESSIONS", "")
+	if got := Load().MaxSessions; got != 10 {
+		t.Errorf("MaxSessions = %d, want default 10", got)
+	}
+}
+
 func TestLoadReadsEnv(t *testing.T) {
 	t.Setenv("HOST", "127.0.0.1")
 	t.Setenv("PORT", "9090")

@@ -65,6 +65,12 @@ type Config struct {
 	// for per-Session request counts (the idle activity signal). It must be reached
 	// off the Guest data path — see cmd/controlplane and deploy/traefik (ADR-0004).
 	TraefikMetricsURL string
+	// MaxSessions is the global cap on concurrent Sessions (ADR-0006), sized to host
+	// capacity ÷ per-Session budget (ADR-0002). At the cap a play request is
+	// rejected with an "at capacity" response rather than queued. A value <= 0
+	// disables the cap (unlimited) — an explicit operator escape hatch, not the
+	// default.
+	MaxSessions int
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -86,6 +92,7 @@ func Load() Config {
 		MaxRuntime:        getenvDuration("MAX_RUNTIME", 45*time.Minute),
 		ReaperInterval:    getenvDuration("REAPER_INTERVAL", 30*time.Second),
 		TraefikMetricsURL: getenv("TRAEFIK_METRICS_URL", "http://127.0.0.1:8084/metrics"),
+		MaxSessions:       getenvInt("MAX_SESSIONS", 10),
 	}
 }
 
