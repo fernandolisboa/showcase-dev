@@ -31,6 +31,22 @@ func find(p ExecutionPlan, name string) (ServiceSpec, bool) {
 	return ServiceSpec{}, false
 }
 
+func TestCompileDBEngineUsedAsIs(t *testing.T) {
+	m, opts := fixture() // validManifest declares DB{postgres, 17}
+	plan, err := Compile(m, opts)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	db, ok := find(plan, dbServiceName)
+	if !ok {
+		t.Fatal("expected a platform db service in the plan")
+	}
+	// The declared engine:version must be used verbatim — never substituted (#16).
+	if want := m.DB.Engine + ":" + m.DB.Version; db.Image != want {
+		t.Errorf("db image = %q, want %q (declared engine used as-is)", db.Image, want)
+	}
+}
+
 func TestCompilePresentInvariants(t *testing.T) {
 	m, opts := fixture()
 	plan, err := Compile(m, opts)
