@@ -1,8 +1,8 @@
 // Package fixture is the in-repo, build-from-source Project the platform builds
-// to exercise the builder (#14) before real Owner repos arrive (#19). It embeds a
-// tiny build context (a Dockerfile + static site) and exposes it as a content
-// hash (the cache key, standing in for a git commit) plus an extractor that
-// materialises it as a docker build context.
+// to exercise the builder (#14) and the multi-service Stack (#15) before real
+// Owner repos arrive (#19). It declares a UI + API run-contract Manifest and
+// embeds a build context per service, each exposed as a content hash (the cache
+// key, standing in for a git commit) plus an extractor.
 package fixture
 
 import (
@@ -14,20 +14,34 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 )
 
-// Dockerfile is the build context's Dockerfile, relative to the extracted dir.
+// Dockerfile is each service context's Dockerfile, relative to the extracted dir.
 const Dockerfile = "Dockerfile"
 
-//go:embed app
+//go:embed web api
 var appFS embed.FS
 
-// Version is a content hash over the embedded build context — the cache key that
-// stands in for a git commit (ADR-0003: invalidate on new commit). It is stable
-// across runs and changes only when the fixture source changes, so editing the
-// Dockerfile or site triggers a rebuild exactly as a new commit would.
-func Version() (string, error) {
-	names, err := contextFiles()
+// Manifest is the fixture's run contract: a UI service at "/" plus an API service
+// mounted same-origin at "/api" (#15). No DB — the multi-service same-origin path
+// is the point here; the platform DB is exercised by the Runner's own fixture and
+// by #16. Each service builds from its embedded context (matching dir name).
+func Manifest() runcontract.Manifest {
+	return runcontract.Manifest{
+		Services: []runcontract.Service{
+			{Name: "web", Repo: "internal/fixture/web", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleUI},
+			{Name: "api", Repo: "internal/fixture/api", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleAPI, PathPrefix: "/api"},
+		},
+	}
+}
+
+// Version is a content hash over a service's embedded build context — the cache
+// key that stands in for a git commit (ADR-0003: invalidate on new commit). It is
+// stable across runs and changes only when that service's source changes.
+func Version(service string) (string, error) {
+	names, err := contextFiles(service)
 	if err != nil {
 		return "", err
 	}
@@ -37,7 +51,6 @@ func Version() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		// name + NUL + content, so neither renames nor edits collide.
 		fmt.Fprintf(h, "%s\x00", name)
 		h.Write(data)
 		h.Write([]byte{0})
@@ -45,17 +58,17 @@ func Version() (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// Extract materialises the embedded build context into a fresh temp directory and
-// returns it with a cleanup func. The builder uses the directory as the docker
+// Extract materialises a service's embedded build context into a fresh temp dir
+// and returns it with a cleanup func. The builder uses the dir as the docker
 // build context. The caller must call cleanup once the build is done.
-func Extract() (dir string, cleanup func(), err error) {
-	dir, err = os.MkdirTemp("", "showcase-fixture-*")
+func Extract(service string) (dir string, cleanup func(), err error) {
+	dir, err = os.MkdirTemp("", "showcase-fixture-"+service+"-*")
 	if err != nil {
 		return "", nil, fmt.Errorf("fixture: temp dir: %w", err)
 	}
 	cleanup = func() { _ = os.RemoveAll(dir) }
 
-	names, err := contextFiles()
+	names, err := contextFiles(service)
 	if err != nil {
 		cleanup()
 		return "", nil, err
@@ -66,16 +79,15 @@ func Extract() (dir string, cleanup func(), err error) {
 			cleanup()
 			return "", nil, err
 		}
-		// Strip the embed root ("app/") so files land at the context root.
-		rel, _ := filepath.Rel("app", name)
+		// Strip the service root (e.g. "web/") so files land at the context root.
+		rel, _ := filepath.Rel(service, name)
 		dst := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
 			cleanup()
 			return "", nil, fmt.Errorf("fixture: mkdir: %w", err)
 		}
 		// 0644: these become the image's files via COPY, and the container runs as a
-		// non-root user (uid 1000) that must be able to read them — an owner-only
-		// mode would make the served files unreadable at runtime.
+		// non-root user that must read them — an owner-only mode would 404 at runtime.
 		if err := os.WriteFile(dst, data, 0o644); err != nil {
 			cleanup()
 			return "", nil, fmt.Errorf("fixture: write %s: %w", rel, err)
@@ -84,11 +96,11 @@ func Extract() (dir string, cleanup func(), err error) {
 	return dir, cleanup, nil
 }
 
-// contextFiles returns the embedded build-context file paths, sorted for a
-// deterministic content hash.
-func contextFiles() ([]string, error) {
+// contextFiles returns a service's embedded build-context file paths, sorted for
+// a deterministic content hash. An unknown service yields an error.
+func contextFiles(service string) ([]string, error) {
 	var names []string
-	err := fs.WalkDir(appFS, "app", func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(appFS, service, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -98,7 +110,10 @@ func contextFiles() ([]string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("fixture: walk embed: %w", err)
+		return nil, fmt.Errorf("fixture: walk %q: %w", service, err)
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("fixture: no build context for service %q", service)
 	}
 	sort.Strings(names)
 	return names, nil

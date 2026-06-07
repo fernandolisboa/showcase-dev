@@ -91,19 +91,19 @@ func main() {
 	// Runner boots, replacing prebuilt refs. The MVP builds one in-repo fixture from
 	// its embedded Dockerfile; #19 will resolve real Owner repos via SpecFunc.
 	imageBuilder := builder.New(cfg.MaxCachedImages, logger)
-	fixtureVersion, err := fixture.Version()
-	if err != nil {
-		logger.Error("compute fixture version", "err", err)
-		os.Exit(1)
-	}
+	fixtureProject := runner.Project{Manifest: fixture.Manifest(), Images: map[string]string{}}
 	source := builder.NewBuildingSource(
-		runner.StaticSource{P: runner.FixtureProject()}, imageBuilder,
+		runner.StaticSource{P: fixtureProject}, imageBuilder,
 		func(projectID string, svc runcontract.Service) (builder.BuildSpec, error) {
+			version, err := fixture.Version(svc.Name)
+			if err != nil {
+				return builder.BuildSpec{}, err
+			}
 			return builder.BuildSpec{
 				ImageName:  "showcase/" + projectID + "-" + svc.Name,
-				Version:    fixtureVersion,
+				Version:    version,
 				Dockerfile: fixture.Dockerfile,
-				Context:    fixture.Extract,
+				Context:    func() (string, func(), error) { return fixture.Extract(svc.Name) },
 			}, nil
 		},
 		logger,
