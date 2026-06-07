@@ -23,6 +23,10 @@ services:
     command: ["--configFile=/etc/traefik/traefik.yml"]
     ports:
       - "80:80"
+      # Prometheus metrics, bound to host loopback so only the control plane on the
+      # host scrapes them (the idle signal for session teardown, ADR-0006) — not
+      # published to any public or Session-reachable interface.
+      - "127.0.0.1:8084:8084"
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
     extra_hosts:

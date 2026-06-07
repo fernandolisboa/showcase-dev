@@ -103,6 +103,13 @@ func (r *Registry) Get(sessionID string) (Route, bool) {
 	return route, ok
 }
 
+// List returns a copy of the current routes, ordered by session id. Unlike the
+// unexported snapshot it is part of the package API: the teardown reaper reads it
+// to learn which Sessions exist and their state (proxy/../session.Reaper).
+func (r *Registry) List() []Route {
+	return r.snapshot()
+}
+
 // snapshot returns the current routes, ordered by session id for deterministic
 // config output.
 func (r *Registry) snapshot() []Route {

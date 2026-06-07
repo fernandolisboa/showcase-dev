@@ -7,6 +7,16 @@
 entryPoints:
   web:
     address: ":80"
+  # Prometheus metrics, on their own entryPoint so they are never served on :80.
+  # The control plane polls these for per-Session request counts (the idle signal
+  # for session teardown, ADR-0006). Published to host loopback only (compose.yml)
+  # so the control plane on the host reaches it off the Guest data path. NOTE: like
+  # :80, this port is reachable by a container on a Session network, and service
+  # labels embed Session ids — harmless while every Session runs the same trusted
+  # fixture, but must be made Session-unreachable before untrusted Owner code
+  # (#14/#19); tracked as a follow-up.
+  metrics:
+    address: ":8084"
 
 providers:
   # The control plane owns the sessionId -> backend map (ADR-0004); Traefik polls
@@ -28,6 +38,15 @@ providers:
 # no Session can reach).
 # api:
 #   dashboard: false
+
+# Prometheus metrics on the dedicated `metrics` entryPoint. Service-level counters
+# (traefik_service_requests_total) are exported by default and carry the service
+# name (s-<id>-ui / s-<id>-api-<n>) — enough for the reaper to attribute requests
+# to a Session. addRoutersLabels is left off (not needed, and keeps cardinality
+# down).
+metrics:
+  prometheus:
+    entryPoint: metrics
 
 log:
   level: INFO
