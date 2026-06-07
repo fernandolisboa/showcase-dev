@@ -83,9 +83,29 @@ func (r *recordingTeardown) tornDown() []string {
 }
 
 func newTestReaper(reg *proxy.Registry, td func(context.Context, string) error, act ActivitySource, idle, maxRun time.Duration, clk *fakeClock) *Reaper {
-	r := NewReaper(reg, td, act, idle, maxRun, time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	// CrashGrace/FailureLinger are set huge and health left nil so the idle/max-runtime
+	// tests aren't perturbed by crash detection or linger removal.
+	cfg := ReaperConfig{Idle: idle, MaxRuntime: maxRun, CrashGrace: time.Hour, FailureLinger: time.Hour, Interval: time.Second}
+	r := NewReaper(reg, td, act, nil, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r.now = clk.now
 	return r
+}
+
+// newCrashReaper wires a HealthChecker and tight crash/linger windows for the
+// failure-handling tests.
+func newCrashReaper(reg *proxy.Registry, td func(context.Context, string) error, health HealthChecker, crashGrace, linger time.Duration, clk *fakeClock) *Reaper {
+	cfg := ReaperConfig{Idle: time.Hour, MaxRuntime: time.Hour, CrashGrace: crashGrace, FailureLinger: linger, Interval: time.Second}
+	r := NewReaper(reg, td, noActivity{}, health, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	r.now = clk.now
+	return r
+}
+
+// noActivity is an ActivitySource that reports no requests — used by crash/linger
+// tests that don't exercise the idle path (Idle is set huge there anyway).
+type noActivity struct{}
+
+func (noActivity) RequestCounts(context.Context) (map[string]uint64, error) {
+	return map[string]uint64{}, nil
 }
 
 // liveSession registers a Session and promotes it to live (the only state the
@@ -248,6 +268,109 @@ func TestReaperPrunesStateForGoneSessions(t *testing.T) {
 	r.tick(context.Background())
 	if len(r.tracked) != 0 {
 		t.Errorf("tracked state should be pruned for a gone session, got %d", len(r.tracked))
+	}
+}
+
+// fakeHealth is a settable HealthChecker for crash tests.
+type fakeHealth struct {
+	mu      sync.Mutex
+	healthy bool
+	err     error
+}
+
+func (f *fakeHealth) set(healthy bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.healthy, f.err = healthy, err
+}
+
+func (f *fakeHealth) check(context.Context, string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.healthy, f.err
+}
+
+func TestReaperCrashesUnhealthyStackAfterGrace(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	liveSession(reg, "boom")
+	fh := &fakeHealth{healthy: false}
+	td := &recordingTeardown{reg: reg}
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	r := newCrashReaper(reg, td.teardown, fh.check, time.Minute, time.Hour, clk)
+
+	r.tick(context.Background()) // first unhealthy sighting: start grace, no crash
+	if got := td.tornDown(); len(got) != 0 {
+		t.Fatalf("must not crash within grace, got %v", got)
+	}
+	clk.advance(2 * time.Minute) // past the grace window
+	r.tick(context.Background())
+
+	if got := td.tornDown(); len(got) != 1 || got[0] != "boom" {
+		t.Fatalf("torn down = %v, want [boom]", got)
+	}
+	// The route lingers in Crashed so the Guest sees the crash page.
+	if route, ok := reg.Get("boom"); !ok || route.State != proxy.Crashed {
+		t.Errorf("route = %+v ok=%v, want Crashed", route, ok)
+	}
+}
+
+func TestReaperCrashGraceAbsorbsTransientBlip(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	liveSession(reg, "blip")
+	fh := &fakeHealth{healthy: false}
+	td := &recordingTeardown{reg: reg}
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	r := newCrashReaper(reg, td.teardown, fh.check, time.Minute, time.Hour, clk)
+
+	r.tick(context.Background()) // unhealthy: grace starts
+	clk.advance(30 * time.Second)
+	fh.set(true, nil)            // recovered within grace
+	r.tick(context.Background()) // healthy again → grace reset
+	clk.advance(10 * time.Minute)
+	r.tick(context.Background())
+
+	if got := td.tornDown(); len(got) != 0 {
+		t.Errorf("a recovered blip must not crash, got %v", got)
+	}
+}
+
+func TestReaperHealthErrorSkipsCrash(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	liveSession(reg, "blind")
+	fh := &fakeHealth{healthy: false, err: errBoom}
+	td := &recordingTeardown{reg: reg}
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	r := newCrashReaper(reg, td.teardown, fh.check, time.Minute, time.Hour, clk)
+
+	r.tick(context.Background())
+	clk.advance(5 * time.Minute)
+	r.tick(context.Background())
+	if got := td.tornDown(); len(got) != 0 {
+		t.Errorf("a health-check error must not crash the session, got %v", got)
+	}
+}
+
+func TestReaperRemovesTerminalRouteAfterLinger(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	reg.Fail("dead", proxy.Failed) // e.g. a won't-start route flagged by the Manager
+	fh := &fakeHealth{healthy: true}
+	td := &recordingTeardown{reg: reg}
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	r := newCrashReaper(reg, td.teardown, fh.check, time.Hour, time.Minute, clk)
+
+	r.tick(context.Background()) // first sighting: start linger
+	if _, ok := reg.Get("dead"); !ok {
+		t.Fatal("failed route should linger initially")
+	}
+	clk.advance(2 * time.Minute) // past the linger window
+	r.tick(context.Background())
+
+	if _, ok := reg.Get("dead"); ok {
+		t.Error("failed route should be removed after the linger window")
+	}
+	// A terminal route's Stack is already gone; the reaper must NOT call teardown.
+	if got := td.tornDown(); len(got) != 0 {
+		t.Errorf("terminal-route removal must not re-teardown, got %v", got)
 	}
 }
 

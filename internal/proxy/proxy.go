@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/base32"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 )
@@ -22,7 +23,19 @@ const (
 	Booting State = iota
 	// Live routes "/" to the UI and each declared prefix to its API.
 	Live
+	// Failed is a Session whose Stack never came up (no healthcheck within the boot
+	// timeout). The Stack is gone; the route lingers, routing to the control-plane
+	// "failed to start" page until the reaper removes it (ADR-0006, #13).
+	Failed
+	// Crashed is a live Session whose Stack stopped being healthy and the restart
+	// policy didn't recover it. Like Failed: Stack gone, route lingers on the
+	// "demo crashed" page until reaped (ADR-0006, #13).
+	Crashed
 )
+
+// Terminal reports whether a state is a failure end-state (Stack destroyed, route
+// lingering on a failure page).
+func (s State) Terminal() bool { return s == Failed || s == Crashed }
 
 // Backend is a Stack service reachable on the per-Session network.
 type Backend struct {
@@ -93,6 +106,57 @@ func (r *Registry) Remove(sessionID string) {
 	r.mu.Lock()
 	delete(r.routes, sessionID)
 	r.mu.Unlock()
+}
+
+// Fail moves a Session's route into a terminal failure state (Failed or Crashed),
+// clearing its backends — the Stack is gone, but the route lingers so the Guest's
+// auto-refreshing page lands on the failure message instead of a dead 404 (#13).
+// It (re)creates the route if absent, since a won't-start teardown removes it
+// first; the reaper removes the lingering route after FailureLinger.
+func (r *Registry) Fail(sessionID string, state State) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	route, ok := r.routes[sessionID]
+	if !ok {
+		route = Route{SessionID: sessionID, Host: r.Host(sessionID)}
+	}
+	route.State = state
+	route.UI = Backend{}
+	route.APIs = nil
+	r.routes[sessionID] = route
+}
+
+// StateByHost returns the state of the Session served at host (e.g.
+// "s-<id>.run.<domain>"), for the status page to pick which message to render. It
+// returns only the state — never backends — so the Demo-facing status listener
+// stays structurally unable to read the backend map (ADR-0004).
+func (r *Registry) StateByHost(host string) (State, bool) {
+	id := r.sessionIDFromHost(host)
+	if id == "" {
+		return 0, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	route, ok := r.routes[id]
+	return route.State, ok
+}
+
+// sessionIDFromHost extracts the Session id from a demo host, or "" if host isn't
+// a demo host under this registry's domain.
+func (r *Registry) sessionIDFromHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(host) // hostnames are case-insensitive; ids are lowercase
+	rest, ok := strings.CutSuffix(host, ".run."+r.domain)
+	if !ok {
+		return ""
+	}
+	id, ok := strings.CutPrefix(rest, "s-")
+	if !ok {
+		return ""
+	}
+	return id
 }
 
 // Get returns a Session's current route, if present.

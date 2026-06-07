@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -178,6 +179,95 @@ func (c *Compose) Teardown(ctx context.Context, sessionID string) error {
 		c.registry.Remove(sessionID)
 	}
 	return nil
+}
+
+// Health reports whether the Session's Stack is healthy: every service container
+// running, and any with a healthcheck reporting healthy. A missing, exited,
+// restarting, or unhealthy container makes the Stack unhealthy — the crash signal
+// the reaper acts on after a grace window (ADR-0006, #13).
+func (c *Compose) Health(ctx context.Context, sessionID string) (bool, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return false, err
+	}
+	// `ps --all` so exited/dead containers show up (a plain `ps` hides them, which
+	// would make a crashed Stack look healthy by omission). --format json so the
+	// state is parseable rather than scraped from a table.
+	out, err := c.compose(ctx, ProjectName(sessionID), "ps", "--all", "--format", "json")
+	if err != nil {
+		return false, fmt.Errorf("compose ps: %w\n%s", err, out)
+	}
+	services, err := parseComposePS(out)
+	if err != nil {
+		return false, fmt.Errorf("parse compose ps: %w", err)
+	}
+	return healthyFromPS(services), nil
+}
+
+// composePS is the subset of `docker compose ps --format json` the health check
+// needs: per-container run state, exit code, and healthcheck status.
+type composePS struct {
+	Service  string `json:"Service"`
+	State    string `json:"State"`    // running, exited, restarting, dead, created, paused
+	ExitCode int    `json:"ExitCode"` // process exit code once State == exited
+	Health   string `json:"Health"`   // healthy, unhealthy, starting, or "" (no healthcheck)
+}
+
+// parseComposePS tolerates both shapes Compose has emitted: a single JSON array,
+// and newline-delimited JSON objects (one per container). Blank lines and any
+// non-JSON noise (e.g. a stray warning on the combined stream) are skipped.
+func parseComposePS(out []byte) ([]composePS, error) {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []composePS
+		if err := json.Unmarshal([]byte(trimmed), &arr); err != nil {
+			return nil, err
+		}
+		return arr, nil
+	}
+	var services []composePS
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var s composePS
+		if err := json.Unmarshal([]byte(line), &s); err != nil {
+			return nil, err
+		}
+		services = append(services, s)
+	}
+	return services, nil
+}
+
+// healthyFromPS decides Stack health from the container list. No containers means
+// the Stack is gone (unhealthy). A running container is healthy unless its
+// healthcheck says otherwise ("unhealthy"/"starting" — the latter counts as
+// not-yet-healthy so a flapping restart reads unhealthy and the grace window
+// decides). A container that has exited 0 is a completed one-shot (e.g. the
+// run-contract's seed step, Restart: "no") and is fine; any other non-running
+// state — a nonzero exit, restarting, dead, etc. — is a crash.
+func healthyFromPS(services []composePS) bool {
+	if len(services) == 0 {
+		return false
+	}
+	for _, s := range services {
+		switch s.State {
+		case "running":
+			if s.Health == "unhealthy" || s.Health == "starting" {
+				return false
+			}
+		case "exited":
+			if s.ExitCode != 0 {
+				return false
+			}
+		default: // restarting, dead, created, paused, removing…
+			return false
+		}
+	}
+	return true
 }
 
 // buildPlan mints any per-Session secrets and compiles the locked-down plan. It

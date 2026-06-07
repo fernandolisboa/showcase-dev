@@ -7,9 +7,10 @@ import (
 	"strings"
 )
 
-// bootingService is the shared Traefik service every Booting Session routes to —
-// the control plane's splash backend.
-const bootingService = "booting"
+// statusService is the shared Traefik service every non-live Session routes to —
+// the control plane's status backend, which serves the booting page and the
+// terminal "failed to start" / "crashed" pages (#13).
+const statusService = "status"
 
 // ConfigHandler serves Traefik's dynamic configuration (HTTP provider) built
 // from the Registry. Traefik polls it; the response is the source of truth for
@@ -48,29 +49,31 @@ func ConfigListenerHandler(reg *Registry, bootingURL, entryPoint string) http.Ha
 	return mux
 }
 
-// BootingListenerHandler is the splash-only surface a booting Session is
-// forwarded to (bootingURL points here). It deliberately has NO /traefik route:
-// Traefik forwards the Guest's full request path, so a compromised Demo that
-// presents a booting Session's Host and asks for /traefik gets the splash, not
-// the control-plane backend map (ADR-0004). Keeping the splash on its own
-// listener — never the one that serves /traefik — is the structural wall.
-func BootingListenerHandler() http.Handler {
-	return SplashHandler()
+// BootingListenerHandler is the status surface a non-live Session is forwarded to
+// (bootingURL points here): it serves the booting page and the terminal failure
+// pages. It deliberately has NO /traefik route: Traefik forwards the Guest's full
+// request path, so a compromised Demo that presents a Session's Host and asks for
+// /traefik gets a status page, not the control-plane backend map (ADR-0004).
+// Keeping it on its own listener — never the one that serves /traefik — is the
+// structural wall; lookup yields only the state, never backends.
+func BootingListenerHandler(lookup func(host string) (State, bool)) http.Handler {
+	return StatusHandler(lookup)
 }
 
 // build renders the dynamic config for all active Sessions.
 func (h *ConfigHandler) build() dynamicConfig {
 	routers := map[string]router{}
 	services := map[string]service{}
-	anyBooting := false
+	anyStatus := false
 
 	for _, rt := range h.reg.snapshot() {
 		hostRule := fmt.Sprintf("Host(`%s`)", rt.Host)
 
-		if rt.State == Booting {
-			// Whole subdomain → the booting page until the Stack is healthy.
-			routers["s-"+rt.SessionID] = h.router(hostRule, bootingService, 1)
-			anyBooting = true
+		if rt.State != Live {
+			// Booting, Failed, Crashed: whole subdomain → the control-plane status
+			// page (booting spinner, then either the live Demo or a failure page).
+			routers["s-"+rt.SessionID] = h.router(hostRule, statusService, 1)
+			anyStatus = true
 			continue
 		}
 
@@ -86,8 +89,8 @@ func (h *ConfigHandler) build() dynamicConfig {
 		services[uiName] = serviceTo(rt.UI.URL)
 	}
 
-	if anyBooting {
-		services[bootingService] = serviceTo(h.bootingURL)
+	if anyStatus {
+		services[statusService] = serviceTo(h.bootingURL)
 	}
 
 	return dynamicConfig{HTTP: httpConfig{Routers: routers, Services: services}}
