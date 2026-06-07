@@ -1,0 +1,23 @@
+# Run Traefik locally in front of booted Sessions (ADR-0004/0009).
+#
+# 1. Start the control plane on the host:  INTERNAL_PORT=8081 make run
+# 2. Start Traefik:                          make proxy-up
+# 3. Boot a Session whose Runner is wired with WithProxy(registry, "showcase-traefik").
+#    It is then reachable at  http://s-<id>.run.localhost
+#    (*.localhost resolves to 127.0.0.1 in modern browsers and curl).
+#
+# The container_name below must match the name the Runner attaches to each
+# Session network (WithProxy's traefikContainer argument).
+services:
+  traefik:
+    image: traefik:v3.7
+    container_name: showcase-traefik
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    ports:
+      - "80:80"
+      - "8080:8080" # Traefik dashboard (dev only)
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+    extra_hosts:
+      # Lets Traefik reach the control plane running on the host (Linux + Desktop).
+      - "host.docker.internal:host-gateway"

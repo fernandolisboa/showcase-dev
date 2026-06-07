@@ -145,3 +145,21 @@ func TestSplashHandler(t *testing.T) {
 		t.Error("splash must auto-refresh so it flips to the live Demo")
 	}
 }
+
+func TestInternalHandler(t *testing.T) {
+	reg := NewRegistry("demo.app")
+	reg.Add("abc", Backend{URL: "http://web:8080"}, nil)
+	h := InternalHandler(reg, "http://control/booting", "web")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/traefik", nil))
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("/traefik content-type = %q, want JSON config", ct)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/anything/at/all", nil))
+	if !strings.Contains(rec.Body.String(), "Starting your demo") {
+		t.Error("non-/traefik paths must serve the booting splash")
+	}
+}

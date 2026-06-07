@@ -20,15 +20,27 @@ type Config struct {
 	// DatabaseURL is the Postgres DSN. Optional during scaffolding — the write
 	// model lands in a later slice.
 	DatabaseURL string
+	// DemoDomain is the registrable demo domain (ADR-0004); Sessions are served
+	// at s-<id>.run.<DemoDomain>. Dev defaults to "localhost".
+	DemoDomain string
+	// BootingBackendURL is the address Traefik routes a booting Session to (the
+	// control-plane splash). Empty lets the caller derive a dev default.
+	BootingBackendURL string
+	// InternalPort is the Traefik-facing internal listener (dynamic config +
+	// splash); kept off the public app port (ADR-0004).
+	InternalPort int
 }
 
 // Load reads configuration from the environment, applying defaults.
 func Load() Config {
 	return Config{
-		Host:        getenv("HOST", ""),
-		Port:        getenvInt("PORT", 8080),
-		Env:         getenv("ENV", "dev"),
-		DatabaseURL: getenv("DATABASE_URL", ""),
+		Host:              getenv("HOST", ""),
+		Port:              getenvInt("PORT", 8080),
+		Env:               getenv("ENV", "dev"),
+		DatabaseURL:       getenv("DATABASE_URL", ""),
+		DemoDomain:        getenv("DEMO_DOMAIN", "localhost"),
+		BootingBackendURL: getenv("PROXY_BOOTING_URL", ""),
+		InternalPort:      getenvInt("INTERNAL_PORT", 8081),
 	}
 }
 

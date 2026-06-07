@@ -1,0 +1,24 @@
+# Traefik v3 static config for LOCAL DEV (no TLS).
+#
+# Production additionally configures a `websecure` (:443) entryPoint and an ACME
+# DNS-01 wildcard certificate for `*.run.<demo-domain>` via Cloudflare
+# (ADR-0004/0009) — Traefik ships the Cloudflare DNS provider in-binary, so this
+# is config-only (CF_DNS_API_TOKEN in the environment), no custom build.
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  # The control plane owns the sessionId -> backend map (ADR-0004); Traefik polls
+  # it over the HTTP provider. host.docker.internal reaches the control plane
+  # running on the host; INTERNAL_PORT defaults to 8081.
+  http:
+    endpoint: "http://host.docker.internal:8081/traefik"
+    pollInterval: "1s"
+
+api:
+  dashboard: true
+  insecure: true # dev only — never expose the dashboard in production
+
+log:
+  level: INFO

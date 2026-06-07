@@ -31,6 +31,18 @@ func (h *ConfigHandler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(h.build())
 }
 
+// InternalHandler builds the Traefik-facing surface: the dynamic-config endpoint
+// (HTTP provider) at GET /traefik, and the booting splash for every other path
+// (a booting Session is forwarded here regardless of the path the Guest asked
+// for). This must be bound to an internal interface only — a Demo must never
+// reach the control plane (ADR-0004).
+func InternalHandler(reg *Registry, bootingURL, entryPoint string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /traefik", NewConfigHandler(reg, bootingURL, entryPoint))
+	mux.Handle("/", SplashHandler())
+	return mux
+}
+
 // build renders the dynamic config for all active Sessions.
 func (h *ConfigHandler) build() dynamicConfig {
 	routers := map[string]router{}

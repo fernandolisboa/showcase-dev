@@ -1,7 +1,9 @@
 //go:build integration
 
 // Seam-2 tests: they boot real containers and require Docker. Run with
-//   go test -tags integration ./internal/runner/...
+//
+//	go test -tags integration ./internal/runner/...
+//
 // They assert behaviour (reachable, healthy, isolated, no leaks) — never
 // specific docker flags.
 package runner
@@ -12,7 +14,46 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/fernandolisboa/showcase-dev/internal/proxy"
 )
+
+// TestProvisionKeepsProxyRegistryCurrent checks the ADR-0004 contract that the
+// Runner keeps the proxy's sessionId->backend map current: a successful boot
+// leaves the Session Live with its UI backend registered; teardown drops it.
+// (No real Traefik attach here — WithProxy with an empty container name skips it.)
+func TestProvisionKeepsProxyRegistryCurrent(t *testing.T) {
+	requireDocker(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	reg := proxy.NewRegistry("localhost")
+	r := NewCompose(StaticSource{P: FixtureProject()}, WithRuntime("runc"), WithProxy(reg, ""))
+	sessionID := "px" + mustToken(t, 6)
+	t.Cleanup(func() { _ = r.Teardown(context.Background(), sessionID) })
+
+	if _, err := r.Provision(ctx, "fixture", sessionID); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	route, ok := reg.Get(sessionID)
+	if !ok {
+		t.Fatal("session should be registered after provision")
+	}
+	if route.State != proxy.Live {
+		t.Errorf("session should be Live after a healthy boot, got %v", route.State)
+	}
+	if want := "http://s-" + sessionID + "-web-1:8080"; route.UI.URL != want {
+		t.Errorf("UI backend = %q, want %q", route.UI.URL, want)
+	}
+
+	if err := r.Teardown(ctx, sessionID); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if _, ok := reg.Get(sessionID); ok {
+		t.Error("session route should be gone after teardown")
+	}
+}
 
 func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 	requireDocker(t)

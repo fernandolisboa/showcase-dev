@@ -95,6 +95,14 @@ func (r *Registry) Remove(sessionID string) {
 	r.mu.Unlock()
 }
 
+// Get returns a Session's current route, if present.
+func (r *Registry) Get(sessionID string) (Route, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	route, ok := r.routes[sessionID]
+	return route, ok
+}
+
 // snapshot returns the current routes, ordered by session id for deterministic
 // config output.
 func (r *Registry) snapshot() []Route {

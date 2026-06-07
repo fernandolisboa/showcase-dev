@@ -7,20 +7,49 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/fernandolisboa/showcase-dev/internal/config"
+	"github.com/fernandolisboa/showcase-dev/internal/proxy"
 	"github.com/fernandolisboa/showcase-dev/internal/server"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config.Load()
+
+	// Traefik-facing internal listener: the Session route registry serves Traefik's
+	// dynamic config and the booting splash. Kept off the public app port so a Demo
+	// can never reach it (ADR-0004). The Runner shares this registry (wired in #10).
+	registry := proxy.NewRegistry(cfg.DemoDomain)
+	bootingURL := cfg.BootingBackendURL
+	if bootingURL == "" {
+		bootingURL = fmt.Sprintf("http://host.docker.internal:%d", cfg.InternalPort)
+	}
+	internalSrv := &http.Server{
+		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.InternalPort)),
+		Handler:           proxy.InternalHandler(registry, bootingURL, "web"),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		logger.Info("internal traefik listener", "addr", internalSrv.Addr)
+		if err := internalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("internal listener error", "err", err)
+		}
+	}()
+	defer func() {
+		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = internalSrv.Shutdown(sc)
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),

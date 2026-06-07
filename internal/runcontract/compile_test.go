@@ -176,11 +176,11 @@ func TestCompileIsDeterministic(t *testing.T) {
 
 func TestCompileErrors(t *testing.T) {
 	cases := map[string]func(*Manifest, *Options){
-		"no project":          func(_ *Manifest, o *Options) { o.Project = "" },
-		"missing image":       func(_ *Manifest, o *Options) { delete(o.Images, "api") },
+		"no project":           func(_ *Manifest, o *Options) { o.Project = "" },
+		"missing image":        func(_ *Manifest, o *Options) { delete(o.Images, "api") },
 		"missing platform env": func(_ *Manifest, o *Options) { delete(o.PlatformEnv, "DATABASE_URL") },
-		"db without creds":    func(_ *Manifest, o *Options) { o.DBCreds = DBCreds{} },
-		"invalid manifest":    func(m *Manifest, _ *Options) { m.Services[1].Role = RoleUI },
+		"db without creds":     func(_ *Manifest, o *Options) { o.DBCreds = DBCreds{} },
+		"invalid manifest":     func(m *Manifest, _ *Options) { m.Services[1].Role = RoleUI },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

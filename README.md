@@ -58,8 +58,31 @@ make web-dev    # terminal 2: Vite dev server, proxies /api + /healthz to :8080
 Local database (needs Docker): `make db-up` / `make db-down`. Copy `.env.example`
 to `.env` to set `PORT`, `DATABASE_URL`, etc.
 
+## Live-Session proxy (local)
+
+Each booted Session is reachable at its own subdomain `s-<id>.run.<demo-domain>`,
+behind Traefik (ADR-0004/0009). The control plane owns the routing map and serves
+it to Traefik over the HTTP provider; a Guest sees a booting page until the Stack
+is healthy, then the live Demo, with same-origin `/api`.
+
+```bash
+INTERNAL_PORT=8081 make run   # control plane: app on :8080, Traefik surface on :8081
+make proxy-up                 # Traefik in front of Sessions (deploy/traefik/)
+# A booted Session (Runner wired with WithProxy(registry, "showcase-traefik")) is
+# then reachable at  http://s-<id>.run.localhost   (*.localhost -> 127.0.0.1)
+make proxy-down
+```
+
+The Traefik-facing endpoints (`/traefik` dynamic config + the booting splash) live
+on a **separate internal port** (`INTERNAL_PORT`), never the public app port — a
+Demo must never reach the control plane. **Production** swaps the dev config for a
+`websecure` entrypoint with an ACME **DNS-01 wildcard cert** for
+`*.run.<demo-domain>` on **Cloudflare** (Traefik ships the provider in-binary;
+config-only) — see `deploy/traefik/traefik.yml`.
+
 ## CI
 
 GitHub Actions runs on every PR and on push to `main`: a **Go** job
 (`vet` + race `test` + `build`), a **Web** job (`lint` + `test` + `build`), and a
 **binary** job that builds the UI and embeds it into the Go binary end-to-end.
+Seam-2 integration tests (`-tags integration`, Docker) run in a dedicated job.

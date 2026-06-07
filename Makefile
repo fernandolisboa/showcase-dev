@@ -51,8 +51,14 @@ clean: ## Remove build artifacts
 	rm -rf $(BIN)
 
 # --- Local Postgres (requires Docker) ----------------------------------------
-.PHONY: db-up db-down
+.PHONY: db-up db-down proxy-up proxy-down
 db-up: ## Start local Postgres (compose.dev.yml)
 	docker compose -f compose.dev.yml up -d
 db-down: ## Stop local Postgres
 	docker compose -f compose.dev.yml down
+
+# --- Live-Session proxy (Traefik) --------------------------------------------
+proxy-up: ## Start Traefik in front of Sessions (run the control plane first)
+	docker compose -f deploy/traefik/compose.yml up -d
+proxy-down: ## Stop Traefik
+	docker compose -f deploy/traefik/compose.yml down
