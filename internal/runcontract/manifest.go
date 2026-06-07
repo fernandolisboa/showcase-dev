@@ -9,8 +9,14 @@ package runcontract
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
+
+// serviceNameRE constrains Owner service names to a safe charset so a name can
+// never evade the reserved-name guard (e.g. "DB", "db ") or break the generated
+// compose. (PR #22 re-review follow-up.)
+var serviceNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // Role is a service's role in the Stack.
 type Role string
@@ -111,6 +117,8 @@ func (m Manifest) Validate() error {
 			errs = append(errs, fmt.Errorf("%s: duplicate service name", where))
 		} else if reservedServiceNames[s.Name] {
 			errs = append(errs, fmt.Errorf("%s: name is reserved for a platform service", where))
+		} else if !serviceNameRE.MatchString(s.Name) {
+			errs = append(errs, fmt.Errorf("%s: name must match [a-z0-9-] and start alphanumeric", where))
 		}
 		seen[s.Name] = true
 
