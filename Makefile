@@ -2,6 +2,9 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 BIN := bin/controlplane
+# Explicit roots so Go tooling never descends into web/node_modules (some npm
+# packages ship stray .go files).
+GO_PKGS := ./cmd/... ./internal/...
 
 .PHONY: help
 help: ## Show this help
@@ -13,10 +16,10 @@ help: ## Show this help
 go-build: ## Build the control-plane binary (embeds current internal/web/dist)
 	go build -o $(BIN) ./cmd/controlplane
 go-test: ## Run Go tests
-	go test -race ./...
+	go test -race $(GO_PKGS)
 go-lint: ## Vet Go (plus golangci-lint if installed)
-	go vet ./...
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "golangci-lint not installed; ran go vet only"
+	go vet $(GO_PKGS)
+	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run $(GO_PKGS) || echo "golangci-lint not installed; ran go vet only"
 tidy: ## Tidy go.mod
 	go mod tidy
 

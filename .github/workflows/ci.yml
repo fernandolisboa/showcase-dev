@@ -17,10 +17,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache: false # stdlib-only: no go.sum to cache
-      - run: go vet ./...
-      - run: go test -race ./...
-      - run: go build ./...
+          cache: true
+      - run: go vet ./cmd/... ./internal/...
+      - run: go test -race ./cmd/... ./internal/...
+      - run: go build ./cmd/... ./internal/...
 
   web:
     name: Web — lint, test, build
@@ -54,6 +54,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-          cache: false # stdlib-only: no go.sum to cache
+          cache: true
       - run: make build
       - run: test -x bin/controlplane
