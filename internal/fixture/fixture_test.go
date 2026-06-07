@@ -29,6 +29,20 @@ func TestManifestIsValidUIPlusAPI(t *testing.T) {
 	if api.PathPrefix != "/api" {
 		t.Errorf("API pathPrefix = %q, want /api (same-origin)", api.PathPrefix)
 	}
+
+	// #16: a Postgres DB and a platform-sourced DATABASE_URL for the API to connect.
+	if m.DB == nil || m.DB.Engine != "postgres" {
+		t.Errorf("expected a postgres DB, got %+v", m.DB)
+	}
+	var hasDBURL bool
+	for _, e := range m.Env {
+		if e.Name == "DATABASE_URL" && e.Source == runcontract.EnvPlatform {
+			hasDBURL = true
+		}
+	}
+	if !hasDBURL {
+		t.Error("expected a platform-sourced DATABASE_URL env")
+	}
 }
 
 func TestVersionPerServiceStableAndDistinct(t *testing.T) {

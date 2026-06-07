@@ -20,11 +20,13 @@ import (
 	"github.com/fernandolisboa/showcase-dev/internal/runner"
 )
 
-// TestBuildMultiServiceFromSourceThenBoot exercises the whole #14/#15 path: build
-// the UI and API images from their embedded Dockerfiles, then boot a Session and
-// reach BOTH services on the Session network — the UI at "/" and the API under
-// "/api". (Same-origin routing through Traefik is unit-tested in internal/proxy;
-// the Traefik-in-the-loop e2e remains a noted follow-up.)
+// TestBuildMultiServiceFromSourceThenBoot exercises the whole #14/#15/#16 path:
+// build the UI and API images from their embedded Dockerfiles, boot a Session,
+// reach BOTH services on the Session network (UI at "/", API under "/api"), and
+// verify the platform stood up a fresh per-Session DB with scoped creds injected
+// into the API as DATABASE_URL that actually authenticate. (Same-origin routing
+// through Traefik is unit-tested in internal/proxy; the Traefik-in-the-loop e2e
+// remains a noted follow-up.)
 func TestBuildMultiServiceFromSourceThenBoot(t *testing.T) {
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		t.Skip("docker not available; skipping builder integration test")
@@ -95,6 +97,39 @@ func TestBuildMultiServiceFromSourceThenBoot(t *testing.T) {
 	if out := curl(ctx, t, network, route.APIs[0].URL+"/api/"); !strings.Contains(out, "Showcase API is running") {
 		t.Errorf("API backend body = %q", out)
 	}
+
+	// #16: the platform stood up a fresh per-Session DB and injected scoped creds
+	// into the API as DATABASE_URL.
+	project := runner.ProjectName(sessionID)
+	dsn := strings.TrimSpace(dockerOut(ctx, t, "exec", project+"-api-1", "printenv", "DATABASE_URL"))
+	if !strings.HasPrefix(dsn, "postgres://showcase:") || !strings.Contains(dsn, "@db:5432/showcase") {
+		t.Fatalf("DATABASE_URL not injected as a scoped DSN: %q", dsn)
+	}
+
+	// The declared engine is used as-is — never substituted.
+	if img := strings.TrimSpace(dockerOut(ctx, t, "inspect", project+"-db-1", "--format", "{{.Config.Image}}")); img != "postgres:17" {
+		t.Errorf("db image = %q, want postgres:17 (declared engine used as-is)", img)
+	}
+
+	// The injected creds authenticate against the per-Session DB: a sidecar on the
+	// Session network connects with the API's own DSN and runs a query.
+	out, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", network,
+		"postgres:17", "psql", dsn, "-tAc", "SELECT 1").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "1" {
+		t.Fatalf("API's injected creds failed to connect to the per-Session DB: %v\n%s", err, out)
+	}
+	// (The DB tearing down with the Session — no leaked volume — is covered by the
+	// Runner's own integration test, TestProvisionBootsReachableStackThenTeardownLeavesNothing.)
+}
+
+// dockerOut runs a docker command and returns stdout, failing the test on error.
+func dockerOut(ctx context.Context, t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := exec.CommandContext(ctx, "docker", args...).Output()
+	if err != nil {
+		t.Fatalf("docker %s: %v", strings.Join(args, " "), err)
+	}
+	return string(out)
 }
 
 func curl(ctx context.Context, t *testing.T, network, url string) string {

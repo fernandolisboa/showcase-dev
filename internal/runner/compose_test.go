@@ -65,6 +65,25 @@ func TestBuildPlanWiring(t *testing.T) {
 	}
 }
 
+func TestPerSessionDBCredsAreUnique(t *testing.T) {
+	c := NewCompose(StaticSource{P: FixtureProject()}, WithRuntime("runc"))
+
+	_, _, s1, err := c.buildPlan(FixtureProject(), "sess1")
+	if err != nil {
+		t.Fatalf("buildPlan 1: %v", err)
+	}
+	_, _, s2, err := c.buildPlan(FixtureProject(), "sess2")
+	if err != nil {
+		t.Fatalf("buildPlan 2: %v", err)
+	}
+	if len(s1) != 1 || len(s2) != 1 {
+		t.Fatalf("expected one minted secret each, got %d and %d", len(s1), len(s2))
+	}
+	if s1[0] == s2[0] {
+		t.Error("each Session must get unique generated DB credentials (#16)")
+	}
+}
+
 func TestResolvePlatformEnv(t *testing.T) {
 	creds := runcontract.DBCreds{User: "u", Password: "p", Database: "d"}
 

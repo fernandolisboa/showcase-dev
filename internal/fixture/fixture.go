@@ -24,15 +24,22 @@ const Dockerfile = "Dockerfile"
 //go:embed web api
 var appFS embed.FS
 
-// Manifest is the fixture's run contract: a UI service at "/" plus an API service
-// mounted same-origin at "/api" (#15). No DB — the multi-service same-origin path
-// is the point here; the platform DB is exercised by the Runner's own fixture and
-// by #16. Each service builds from its embedded context (matching dir name).
+// Manifest is the fixture's run contract: a UI service at "/", an API service
+// mounted same-origin at "/api" (#15), and a fresh per-Session Postgres the
+// platform stands up with generated, scoped credentials injected as the
+// DATABASE_URL platform env (#16). Each service builds from its embedded context
+// (matching dir name).
 func Manifest() runcontract.Manifest {
 	return runcontract.Manifest{
 		Services: []runcontract.Service{
 			{Name: "web", Repo: "internal/fixture/web", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleUI},
 			{Name: "api", Repo: "internal/fixture/api", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleAPI, PathPrefix: "/api"},
+		},
+		DB: &runcontract.DB{Engine: "postgres", Version: "17"},
+		Env: []runcontract.EnvVar{
+			// The platform mints per-Session creds and resolves this to the DSN of
+			// the in-Stack DB; the API connects with it (#16).
+			{Name: "DATABASE_URL", Source: runcontract.EnvPlatform},
 		},
 	}
 }
