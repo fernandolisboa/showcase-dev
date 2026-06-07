@@ -69,10 +69,10 @@ func TestBuildBootingRoutesToSplash(t *testing.T) {
 	if rtr.Rule != "Host(`s-abc.run.demo.app`)" {
 		t.Errorf("rule = %q", rtr.Rule)
 	}
-	if rtr.Service != bootingService {
+	if rtr.Service != statusService {
 		t.Errorf("booting must route to splash service, got %q", rtr.Service)
 	}
-	if svc := cfg.HTTP.Services[bootingService]; svc.LoadBalancer.Servers[0].URL != "http://control:9000" {
+	if svc := cfg.HTTP.Services[statusService]; svc.LoadBalancer.Servers[0].URL != "http://control:9000" {
 		t.Errorf("booting service backend = %+v", svc)
 	}
 }
@@ -111,7 +111,7 @@ func TestBuildLiveSameOriginRouting(t *testing.T) {
 		t.Error("api service backend wrong")
 	}
 	// A live Session needs no booting service.
-	if _, present := cfg.HTTP.Services[bootingService]; present {
+	if _, present := cfg.HTTP.Services[statusService]; present {
 		t.Error("no booting service expected for a fully-live config")
 	}
 }
@@ -196,11 +196,15 @@ func TestBootingListenerNeverServesBackendMap(t *testing.T) {
 	reg.Add("victim", Backend{URL: "http://secret-ui:8080"}, []Backend{{PathPrefix: "/api", URL: "http://secret-api:8080"}})
 	reg.Promote("victim")
 
-	h := BootingListenerHandler()
+	h := BootingListenerHandler(reg.StateByHost)
 
 	for _, path := range []string{"/traefik", "/", "/api", "/anything"} {
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		// Present the victim's own Host (a Live session) — even then the status
+		// surface must serve a page, never the backend map.
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Host = reg.Host("victim")
+		h.ServeHTTP(rec, req)
 
 		body := rec.Body.String()
 		if !strings.Contains(body, "Starting your demo") {

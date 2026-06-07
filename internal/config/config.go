@@ -65,6 +65,13 @@ type Config struct {
 	// for per-Session request counts (the idle activity signal). It must be reached
 	// off the Guest data path — see cmd/controlplane and deploy/traefik (ADR-0004).
 	TraefikMetricsURL string
+	// CrashGrace is how long a live Session may report unhealthy before it's torn
+	// down as crashed — the window for the restart policy to absorb a transient
+	// blip (ADR-0006, #13).
+	CrashGrace time.Duration
+	// FailureLinger is how long a Failed/Crashed Session's route is kept so the
+	// Guest's page lands on the failure message before the reaper removes it (#13).
+	FailureLinger time.Duration
 	// MaxSessions is the global cap on concurrent Sessions (ADR-0006), sized to host
 	// capacity ÷ per-Session budget (ADR-0002). At the cap a play request is
 	// rejected with an "at capacity" response rather than queued. A value <= 0
@@ -92,6 +99,8 @@ func Load() Config {
 		MaxRuntime:        getenvDuration("MAX_RUNTIME", 45*time.Minute),
 		ReaperInterval:    getenvDuration("REAPER_INTERVAL", 30*time.Second),
 		TraefikMetricsURL: getenv("TRAEFIK_METRICS_URL", "http://127.0.0.1:8084/metrics"),
+		CrashGrace:        getenvDuration("CRASH_GRACE", 30*time.Second),
+		FailureLinger:     getenvDuration("FAILURE_LINGER", 2*time.Minute),
 		MaxSessions:       getenvInt("MAX_SESSIONS", 10),
 	}
 }

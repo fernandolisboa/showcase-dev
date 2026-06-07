@@ -137,16 +137,26 @@ func (m *Manager) Play(projectID string) (Session, error) {
 
 // boot provisions the Stack on a context derived from the Manager's server-scoped
 // baseCtx (the Guest's request has already returned). The Runner re-registers the
-// real backends, attaches the proxy, and promotes to live; on failure — including
-// a Shutdown that cancels baseCtx mid-boot — it tears down and we drop the route,
-// so an aborted boot leaves nothing behind (ADR-0006).
+// real backends, attaches the proxy, and promotes to live; on failure the Runner
+// has already torn the Stack down, so nothing leaks (ADR-0006).
+//
+// On a won't-start failure the route is moved to Failed (not removed) so the
+// Guest's auto-refreshing page lands on a "failed to start" message instead of a
+// dead 404; the reaper removes the lingering route after FailureLinger (#13). The
+// exception is a Shutdown that cancelled the boot mid-flight (baseCtx done): that
+// isn't a demo failure, so we just drop the route as the process exits.
 func (m *Manager) boot(projectID, sessionID string) {
 	defer m.inflight.Done()
 	ctx, cancel := context.WithTimeout(m.baseCtx, m.bootLimit)
 	defer cancel()
 	if _, err := m.runner.Provision(ctx, projectID, sessionID); err != nil {
-		m.logger.Error("session boot failed", "session", sessionID, "err", err)
-		m.registry.Remove(sessionID)
+		if m.baseCtx.Err() != nil {
+			m.registry.Remove(sessionID)
+			return
+		}
+		// Owner-facing: err carries the (secret-scrubbed) compose output (ADR-0006).
+		m.logger.Error("session failed to start", "session", sessionID, "err", err)
+		m.registry.Fail(sessionID, proxy.Failed)
 	}
 }
 

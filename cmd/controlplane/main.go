@@ -62,7 +62,7 @@ func main() {
 	}
 	splashSrv := &http.Server{
 		Addr:              net.JoinHostPort(cfg.InternalHost, strconv.Itoa(cfg.SplashPort)),
-		Handler:           proxy.BootingListenerHandler(),
+		Handler:           proxy.BootingListenerHandler(registry.StateByHost),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	for _, s := range []struct {
@@ -93,14 +93,23 @@ func main() {
 	)
 	sessions := session.NewManager(compose, registry, cfg.DemoScheme, cfg.MaxSessions, logger)
 
-	// The reaper tears Sessions down on idle and at the max-runtime cap (ADR-0006).
-	// Its idle signal is Traefik's per-Session request counter, polled over host
-	// loopback so the control plane observes Guest activity without sitting on the
-	// Guest data path (ADR-0004); the Runner's Teardown destroys the Stack. It runs
-	// for the life of the process and is cancelled+drained at shutdown (below).
+	// The reaper tears Sessions down on idle, at the max-runtime cap, and on crash,
+	// and removes the lingering routes of failed Sessions (ADR-0006). Its idle
+	// signal is Traefik's per-Session request counter, polled over host loopback so
+	// the control plane observes Guest activity without sitting on the Guest data
+	// path (ADR-0004); its crash signal is the Runner's per-Session health; the
+	// Runner's Teardown destroys the Stack. It runs for the life of the process and
+	// is cancelled+drained at shutdown (below).
 	reaper := session.NewReaper(
-		registry, compose.Teardown, proxy.NewTraefikMetrics(cfg.TraefikMetricsURL),
-		cfg.IdleTimeout, cfg.MaxRuntime, cfg.ReaperInterval, logger,
+		registry, compose.Teardown, proxy.NewTraefikMetrics(cfg.TraefikMetricsURL), compose.Health,
+		session.ReaperConfig{
+			Idle:          cfg.IdleTimeout,
+			MaxRuntime:    cfg.MaxRuntime,
+			CrashGrace:    cfg.CrashGrace,
+			FailureLinger: cfg.FailureLinger,
+			Interval:      cfg.ReaperInterval,
+		},
+		logger,
 	)
 	reaperCtx, stopReaper := context.WithCancel(context.Background())
 	reaperDone := make(chan struct{})

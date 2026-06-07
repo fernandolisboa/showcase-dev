@@ -22,6 +22,19 @@ func TestTeardownTunablesParseAndDefault(t *testing.T) {
 	}
 }
 
+func TestFailureTunablesParseAndDefault(t *testing.T) {
+	t.Setenv("CRASH_GRACE", "45s")
+	t.Setenv("FAILURE_LINGER", "junk") // malformed must fall back
+
+	cfg := Load()
+	if cfg.CrashGrace != 45*time.Second {
+		t.Errorf("CrashGrace = %v, want 45s", cfg.CrashGrace)
+	}
+	if cfg.FailureLinger != 2*time.Minute {
+		t.Errorf("FailureLinger = %v, want default 2m on garbage", cfg.FailureLinger)
+	}
+}
+
 func TestMaxSessionsParsesAndDefaults(t *testing.T) {
 	t.Setenv("MAX_SESSIONS", "3")
 	if got := Load().MaxSessions; got != 3 {

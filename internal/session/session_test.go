@@ -115,7 +115,7 @@ func TestPlayReturnsURLAndRegistersBootingThenBootsInBackground(t *testing.T) {
 	}
 }
 
-func TestPlayFailureDropsRoute(t *testing.T) {
+func TestPlayFailureMovesRouteToFailed(t *testing.T) {
 	reg := proxy.NewRegistry("demo.app")
 	runner := &fakeRunner{called: make(chan string, 1), failWith: errBoom}
 	m := newTestManager(runner, reg)
@@ -123,14 +123,17 @@ func TestPlayFailureDropsRoute(t *testing.T) {
 	sess, _ := m.Play("fixture")
 	<-runner.called
 
+	// A won't-start boot moves the route to Failed (not removed) so the Guest's
+	// auto-refreshing page lands on the "failed to start" message; the reaper
+	// removes the lingering route later (#13).
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, ok := reg.Get(sess.ID); !ok {
-			return // route dropped after the failed boot — correct
+		if route, ok := reg.Get(sess.ID); ok && route.State == proxy.Failed {
+			return // failed route lingering — correct
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Error("route should be removed after a boot failure")
+	t.Error("route should be in Failed state after a boot failure")
 }
 
 func TestPlayHandlerServesJSON(t *testing.T) {

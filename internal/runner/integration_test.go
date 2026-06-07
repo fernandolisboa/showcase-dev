@@ -80,6 +80,11 @@ func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 		t.Fatalf("UI not reachable at %s: %v\n%s", url, err, out)
 	}
 
+	// Health (the crash signal, #13) reports a healthy Stack end-to-end.
+	if healthy, err := r.Health(ctx, sessionID); err != nil || !healthy {
+		t.Errorf("Health = %v, err = %v; want healthy", healthy, err)
+	}
+
 	// Default-deny egress (ADR-0007): the same internal network cannot reach out.
 	if _, err := dockerRun(ctx, network, "-s", "--max-time", "8", "https://example.com"); err == nil {
 		t.Error("expected egress to be denied on the internal Session network")
@@ -87,6 +92,11 @@ func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 
 	if err := r.Teardown(ctx, sessionID); err != nil {
 		t.Fatalf("teardown: %v", err)
+	}
+
+	// With the Stack gone, Health reports unhealthy (no containers) rather than erroring.
+	if healthy, err := r.Health(ctx, sessionID); err != nil || healthy {
+		t.Errorf("Health after teardown = %v, err = %v; want unhealthy, no error", healthy, err)
 	}
 
 	// No leaks: no containers, no network, no volumes remain for this project.

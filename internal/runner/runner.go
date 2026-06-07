@@ -22,6 +22,12 @@ type Runner interface {
 
 	// Teardown destroys the Session's Stack and releases its resources.
 	Teardown(ctx context.Context, sessionID string) error
+
+	// Health reports whether the Session's Stack is currently healthy — all
+	// services running and any healthchecks passing. It is the crash signal: a
+	// live Session that reports unhealthy past a grace window is torn down as
+	// crashed (ADR-0006, #13).
+	Health(ctx context.Context, sessionID string) (bool, error)
 }
 
 // Stub is a no-op Runner used by the scaffold; it satisfies the interface and
@@ -38,4 +44,9 @@ func (Stub) Provision(context.Context, string, string) (string, error) {
 // Teardown implements Runner.
 func (Stub) Teardown(context.Context, string) error {
 	return ErrNotImplemented
+}
+
+// Health implements Runner.
+func (Stub) Health(context.Context, string) (bool, error) {
+	return false, ErrNotImplemented
 }
