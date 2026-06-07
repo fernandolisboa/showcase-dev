@@ -24,7 +24,7 @@ func (noopProvisioner) Teardown(context.Context, string) error { return nil }
 
 func testManager() *session.Manager {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return session.NewManager(noopProvisioner{}, proxy.NewRegistry("demo.app"), "https", logger)
+	return session.NewManager(noopProvisioner{}, proxy.NewRegistry("demo.app"), "https", 0, logger)
 }
 
 // run must surface a failed bind as a non-nil error so main exits non-zero — a

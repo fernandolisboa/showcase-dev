@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 type Session = { id: string; url: string }
-type Status = 'idle' | 'starting' | 'error'
+type Status = 'idle' | 'starting' | 'error' | 'capacity'
 
 // navigate is injected so the click flow is testable; in the browser it sends the
 // Guest to their live Session URL (the proxy shows the booting page, then the Demo).
@@ -14,6 +14,12 @@ export default function ProjectPage({ navigate = (url) => (window.location.href 
     setStatus('starting')
     try {
       const res = await fetch('/api/play', { method: 'POST' })
+      // 503 = the platform is at its global capacity (ADR-0006); tell the Guest to
+      // retry shortly rather than show a hard error — a slot frees as Sessions end.
+      if (res.status === 503) {
+        setStatus('capacity')
+        return
+      }
       if (!res.ok) throw new Error(String(res.status))
       const session = (await res.json()) as Session
       navigate(session.url)
@@ -31,6 +37,9 @@ export default function ProjectPage({ navigate = (url) => (window.location.href 
       </button>
       {status === 'error' && (
         <p role="alert">Could not start the demo. Please try again.</p>
+      )}
+      {status === 'capacity' && (
+        <p role="alert">Too many demos are running right now. Please try again in a moment.</p>
       )}
     </main>
   )

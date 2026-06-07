@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +17,17 @@ import (
 )
 
 var errBoom = errors.New("boom")
+
+// quietRunner provisions instantly and never blocks, so cap tests can drive many
+// Plays without juggling channels; it leaves the registry to the Manager, so a
+// played Session's placeholder route persists (counting toward the cap) until
+// explicitly removed.
+type quietRunner struct{}
+
+func (quietRunner) Provision(_ context.Context, _, sessionID string) (string, error) {
+	return "http://" + sessionID, nil
+}
+func (quietRunner) Teardown(context.Context, string) error { return nil }
 
 type fakeRunner struct {
 	called   chan string
@@ -65,7 +78,11 @@ func (b *blockingRunner) Teardown(_ context.Context, sessionID string) error {
 }
 
 func newTestManager(runner Provisioner, reg *proxy.Registry) *Manager {
-	return NewManager(runner, reg, "https", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewManager(runner, reg, "https", 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func newCappedManager(runner Provisioner, reg *proxy.Registry, maxSessions int) *Manager {
+	return NewManager(runner, reg, "https", maxSessions, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestPlayReturnsURLAndRegistersBootingThenBootsInBackground(t *testing.T) {
@@ -134,6 +151,118 @@ func TestPlayHandlerServesJSON(t *testing.T) {
 	}
 	if sess.ID == "" || sess.URL == "" {
 		t.Errorf("incomplete session: %+v", sess)
+	}
+}
+
+func TestPlayRejectsAtCapacity(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	m := newCappedManager(quietRunner{}, reg, 2)
+
+	if _, err := m.Play("fixture"); err != nil {
+		t.Fatalf("first play: %v", err)
+	}
+	if _, err := m.Play("fixture"); err != nil {
+		t.Fatalf("second play: %v", err)
+	}
+	if _, err := m.Play("fixture"); !errors.Is(err, ErrAtCapacity) {
+		t.Fatalf("third play err = %v, want ErrAtCapacity", err)
+	}
+	// The rejected play minted no id and registered no route: still exactly the cap.
+	if got := reg.Len(); got != 2 {
+		t.Errorf("registry has %d sessions, want 2 (rejected play must not register)", got)
+	}
+}
+
+func TestCapacityFreesAfterTeardown(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	m := newCappedManager(quietRunner{}, reg, 1)
+
+	first, err := m.Play("fixture")
+	if err != nil {
+		t.Fatalf("first play: %v", err)
+	}
+	if _, err := m.Play("fixture"); !errors.Is(err, ErrAtCapacity) {
+		t.Fatalf("play at cap err = %v, want ErrAtCapacity", err)
+	}
+
+	reg.Remove(first.ID) // a teardown (reaper / boot failure) frees the slot
+
+	if _, err := m.Play("fixture"); err != nil {
+		t.Errorf("play after a slot freed: %v, want success", err)
+	}
+}
+
+func TestCapDisabledWhenNonPositive(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	m := newCappedManager(quietRunner{}, reg, 0) // 0 = unlimited
+
+	for i := 0; i < 25; i++ {
+		if _, err := m.Play("fixture"); err != nil {
+			t.Fatalf("play %d with cap disabled: %v", i, err)
+		}
+	}
+	if got := reg.Len(); got != 25 {
+		t.Errorf("registry has %d sessions, want 25 (cap disabled)", got)
+	}
+}
+
+// TestConcurrentPlaysNeverExceedCap proves the admission decision is atomic: under
+// a stampede, exactly cap plays win and the rest are rejected — never an overshoot.
+// Run with -race.
+func TestConcurrentPlaysNeverExceedCap(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	const cap, attempts = 5, 64
+	m := newCappedManager(quietRunner{}, reg, cap)
+
+	var admitted, rejected atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			switch _, err := m.Play("fixture"); {
+			case err == nil:
+				admitted.Add(1)
+			case errors.Is(err, ErrAtCapacity):
+				rejected.Add(1)
+			default:
+				t.Errorf("unexpected play error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if admitted.Load() != cap {
+		t.Errorf("admitted %d, want exactly %d", admitted.Load(), cap)
+	}
+	if rejected.Load() != attempts-cap {
+		t.Errorf("rejected %d, want %d", rejected.Load(), attempts-cap)
+	}
+	if got := reg.Len(); got != cap {
+		t.Errorf("registry has %d sessions, want %d", got, cap)
+	}
+}
+
+func TestPlayHandlerAtCapacityReturns503(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	m := newCappedManager(quietRunner{}, reg, 1)
+	reg.Add("taken", proxy.Backend{}, nil) // already at the cap of 1
+
+	rec := httptest.NewRecorder()
+	PlayHandler(m, "fixture").ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/play", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("missing Retry-After header on an at-capacity response")
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if body["error"] != "at_capacity" {
+		t.Errorf("error = %q, want at_capacity", body["error"])
 	}
 }
 

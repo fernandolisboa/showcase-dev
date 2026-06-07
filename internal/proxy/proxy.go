@@ -103,6 +103,15 @@ func (r *Registry) Get(sessionID string) (Route, bool) {
 	return route, ok
 }
 
+// Len reports the number of active Session routes (booting + live) — the
+// concurrent-Session count the global cap is enforced against (#12). Removing a
+// route on teardown decrements it, so a slot frees the instant a Session ends.
+func (r *Registry) Len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.routes)
+}
+
 // List returns a copy of the current routes, ordered by session id. Unlike the
 // unexported snapshot it is part of the package API: the teardown reaper reads it
 // to learn which Sessions exist and their state (proxy/../session.Reaper).

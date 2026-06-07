@@ -91,7 +91,7 @@ func main() {
 		runner.WithRuntime(cfg.Runtime),
 		runner.WithProxy(registry, cfg.TraefikContainer),
 	)
-	sessions := session.NewManager(compose, registry, cfg.DemoScheme, logger)
+	sessions := session.NewManager(compose, registry, cfg.DemoScheme, cfg.MaxSessions, logger)
 
 	// The reaper tears Sessions down on idle and at the max-runtime cap (ADR-0006).
 	// Its idle signal is Traefik's per-Session request counter, polled over host
