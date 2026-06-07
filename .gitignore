@@ -19,3 +19,8 @@ node_modules/
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code: per-user local permissions (already covered by the global ignore;
+# repeated here so the repo is self-contained) + transient agent git worktrees.
+.claude/settings.local.json
+.claude/worktrees/
