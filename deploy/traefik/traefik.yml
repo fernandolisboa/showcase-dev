@@ -1,0 +1,33 @@
+# Traefik v3 static config for LOCAL DEV (no TLS).
+#
+# Production additionally configures a `websecure` (:443) entryPoint and an ACME
+# DNS-01 wildcard certificate for `*.run.<demo-domain>` via Cloudflare
+# (ADR-0004/0009) — Traefik ships the Cloudflare DNS provider in-binary, so this
+# is config-only (CF_DNS_API_TOKEN in the environment), no custom build.
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  # The control plane owns the sessionId -> backend map (ADR-0004); Traefik polls
+  # it over the HTTP provider. host.docker.internal reaches the control plane on the
+  # host; INTERNAL_PORT (the config listener) defaults to 8081. A booting Session is
+  # routed to the SEPARATE splash listener (SPLASH_PORT, default 8082), which has no
+  # /traefik route — so a Demo whose full path Traefik forwards can never read this
+  # map.
+  http:
+    endpoint: "http://host.docker.internal:8081/traefik"
+    pollInterval: "1s"
+
+# The dashboard is disabled. `api.insecure: true` exposes the full backend map
+# (every Session's internal URLs) over :8080 with no auth, and Traefik is attached
+# to every Session network — so any Session container could read it (ADR-0004). To
+# inspect routers locally, run `curl http://host.docker.internal:8081/traefik` from
+# the host (the control plane's loopback-bound config endpoint), not the dashboard.
+# Production must likewise keep the dashboard off (or behind auth on an interface
+# no Session can reach).
+# api:
+#   dashboard: false
+
+log:
+  level: INFO

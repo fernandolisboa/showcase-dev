@@ -72,3 +72,22 @@ func TestValidateReportsAllProblemsAtOnce(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateServiceNameCharset(t *testing.T) {
+	// Rejected, including reserved-guard near-misses ("DB", "db ").
+	for _, name := range []string{"API", "DB", "my_api", "has space", "db ", "-lead", "sym$bol"} {
+		m := validManifest()
+		m.Services[1].Name = name
+		if err := m.Validate(); err == nil {
+			t.Errorf("service name %q should be rejected", name)
+		}
+	}
+	// Valid names pass.
+	for _, name := range []string{"api", "api-2", "web3"} {
+		m := validManifest()
+		m.Services[1].Name = name
+		if err := m.Validate(); err != nil {
+			t.Errorf("service name %q should be valid: %v", name, err)
+		}
+	}
+}

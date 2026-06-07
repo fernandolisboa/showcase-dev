@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fernandolisboa/showcase-dev/internal/proxy"
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 )
 
@@ -35,7 +36,9 @@ type Compose struct {
 	source    ProjectSource
 	runtime   string
 	workdir   string
-	bootLimit string // --wait-timeout for `compose up`
+	bootLimit string          // --wait-timeout for `compose up`
+	registry  *proxy.Registry // optional; nil = no proxy integration (e.g. #8 tests)
+	traefik   string          // Traefik container to attach to each Session network
 }
 
 // Option configures a Compose runner.
@@ -50,6 +53,16 @@ func WithRuntime(runtime string) Option {
 // WithWorkdir sets the base dir for generated compose files.
 func WithWorkdir(dir string) Option {
 	return func(c *Compose) { c.workdir = dir }
+}
+
+// WithProxy wires the Runner to a Traefik proxy: it keeps the registry's
+// sessionId->backend map current (ADR-0004) and attaches the named Traefik
+// container to each Session's network so Traefik can reach the live Stack.
+func WithProxy(registry *proxy.Registry, traefikContainer string) Option {
+	return func(c *Compose) {
+		c.registry = registry
+		c.traefik = traefikContainer
+	}
 }
 
 // NewCompose builds a Compose runner over the given ProjectSource.
@@ -105,6 +118,13 @@ func (c *Compose) Provision(ctx context.Context, projectID, sessionID string) (s
 		return "", fmt.Errorf("write compose: %w", err)
 	}
 
+	// Register the Session as booting so the proxy serves the splash while it
+	// boots; the backends become reachable once it goes live (ADR-0004).
+	if c.registry != nil {
+		ui, apis := sessionBackends(proj, sessionID)
+		c.registry.Add(sessionID, ui, apis)
+	}
+
 	if out, err := c.compose(ctx, ProjectName(sessionID),
 		"-f", file, "up", "-d", "--wait", "--wait-timeout", c.bootLimit); err != nil {
 		// Best-effort cleanup so a half-booted Stack leaves nothing behind.
@@ -113,6 +133,15 @@ func (c *Compose) Provision(ctx context.Context, projectID, sessionID string) (s
 		// failure; ADR-0006 routes this output to the Owner, so scrub minted
 		// secrets before surfacing.
 		return "", fmt.Errorf("compose up: %w\n%s", err, scrubSecrets(string(out), secrets))
+	}
+
+	// The network now exists: attach the proxy to it and flip the Session live.
+	if c.registry != nil {
+		if err := c.attachProxy(ctx, sessionID); err != nil {
+			_ = c.Teardown(context.WithoutCancel(ctx), sessionID)
+			return "", fmt.Errorf("attach proxy: %w", err)
+		}
+		c.registry.Promote(sessionID)
 	}
 	return url, nil
 }
@@ -124,6 +153,10 @@ func (c *Compose) Teardown(ctx context.Context, sessionID string) error {
 		return err
 	}
 	project := ProjectName(sessionID)
+	if c.registry != nil {
+		c.registry.Remove(sessionID)
+		c.detachProxy(ctx, sessionID)
+	}
 	out, err := c.compose(ctx, project, "down", "-v", "--remove-orphans")
 	_ = os.RemoveAll(filepath.Join(c.workdir, project))
 	if err != nil {
@@ -211,8 +244,48 @@ func validateSessionID(id string) error {
 }
 
 func (c *Compose) compose(ctx context.Context, project string, args ...string) ([]byte, error) {
-	full := append([]string{"compose", "-p", project}, args...)
-	return exec.CommandContext(ctx, "docker", full...).CombinedOutput()
+	return dockerCmd(ctx, append([]string{"compose", "-p", project}, args...)...)
+}
+
+func dockerCmd(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+}
+
+// sessionBackends derives the proxy backends from the Manifest. Each container is
+// reachable on the Session network by its compose container name
+// (<project>-<service>-1), which is unique across Sessions — unlike the bare
+// service name, which would collide when the proxy joins many Session networks.
+func sessionBackends(proj Project, sessionID string) (proxy.Backend, []proxy.Backend) {
+	project := ProjectName(sessionID)
+	var ui proxy.Backend
+	var apis []proxy.Backend
+	for _, s := range proj.Manifest.Services {
+		url := fmt.Sprintf("http://%s-%s-1:%d", project, s.Name, s.Port)
+		switch s.Role {
+		case runcontract.RoleUI:
+			ui = proxy.Backend{URL: url}
+		case runcontract.RoleAPI:
+			apis = append(apis, proxy.Backend{PathPrefix: s.PathPrefix, URL: url})
+		}
+	}
+	return ui, apis
+}
+
+func (c *Compose) attachProxy(ctx context.Context, sessionID string) error {
+	if c.traefik == "" {
+		return nil
+	}
+	if out, err := dockerCmd(ctx, "network", "connect", NetworkName(sessionID), c.traefik); err != nil {
+		return fmt.Errorf("%w\n%s", err, out)
+	}
+	return nil
+}
+
+func (c *Compose) detachProxy(ctx context.Context, sessionID string) {
+	if c.traefik == "" {
+		return
+	}
+	_, _ = dockerCmd(ctx, "network", "disconnect", "-f", NetworkName(sessionID), c.traefik)
 }
 
 // scrubSecrets replaces every occurrence of each secret value in s with a
