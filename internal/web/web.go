@@ -22,14 +22,26 @@ func Handler() http.Handler {
 	if err != nil {
 		panic(err) // dist is embedded at build time; this cannot fail.
 	}
+	return handlerFor(dist)
+}
+
+// handlerFor builds the SPA handler over dist. It is split out so tests can
+// exercise it against a fixture filesystem (e.g. one containing a directory).
+func handlerFor(dist fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(dist))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if asset := strings.TrimPrefix(r.URL.Path, "/"); asset != "" {
 			if f, err := dist.Open(asset); err == nil {
+				info, statErr := f.Stat()
 				_ = f.Close()
-				fileServer.ServeHTTP(w, r)
-				return
+				// Serve regular files only. A directory must never reach
+				// http.FileServer on this guest-facing surface — it would emit an
+				// autoindex listing. Directories fall through to index.html.
+				if statErr == nil && info.Mode().IsRegular() {
+					fileServer.ServeHTTP(w, r)
+					return
+				}
 			}
 		}
 		if index, err := fs.ReadFile(dist, "index.html"); err == nil {

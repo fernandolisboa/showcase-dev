@@ -32,10 +32,25 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := run(ctx, stop, logger, srv, cfg.Addr(), cfg.Env); err != nil {
+		os.Exit(1)
+	}
+}
+
+// run serves srv until ctx is cancelled (signal) or the listener fails, then
+// shuts down gracefully. It returns a non-nil error when the server failed to
+// run — a failed bind (port in use) must surface as a non-zero exit, otherwise a
+// control plane that never came up looks like a clean start to a supervisor.
+func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv *http.Server, addr, env string) error {
+	// serveErr carries a fatal listen error back to the main path. It is buffered
+	// so the goroutine never blocks, and the send happens-before stop(), which the
+	// <-ctx.Done() below synchronizes on.
+	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("control plane listening", "addr", cfg.Addr(), "env", cfg.Env)
+		logger.Info("control plane listening", "addr", addr, "env", env)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server error", "err", err)
+			serveErr <- err
 			stop()
 		}
 	}()
@@ -47,6 +62,14 @@ func main() {
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "err", err)
-		os.Exit(1)
+		return err
+	}
+
+	// A signal-driven shutdown is success; a shutdown forced by a server error is not.
+	select {
+	case err := <-serveErr:
+		return err
+	default:
+		return nil
 	}
 }
