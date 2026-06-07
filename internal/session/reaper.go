@@ -20,6 +20,11 @@ type ActivitySource interface {
 // down` can't wedge the reap loop.
 const reaperTeardownTimeout = 30 * time.Second
 
+// minReaperInterval is the floor for the scan interval. A non-positive interval
+// would panic time.NewTicker and silently kill the reaper goroutine — and with it
+// all teardown — so a misconfigured (or zero) interval is clamped, not honored.
+const minReaperInterval = time.Second
+
 // Reaper enforces ADR-0006's two end conditions on running Sessions: it tears a
 // Session down after IdleTimeout with no activity (the primary cost lever) and at
 // MaxRuntime regardless of activity (the absolute backstop). It scans on a ticker
@@ -60,6 +65,10 @@ type sessionClock struct {
 // NewReaper builds a Reaper. teardown is the Runner's Teardown (which drops the
 // route and destroys the Stack); activity is the idle signal source.
 func NewReaper(registry *proxy.Registry, teardown func(context.Context, string) error, activity ActivitySource, idle, maxRun, interval time.Duration, logger *slog.Logger) *Reaper {
+	if interval < minReaperInterval {
+		logger.Warn("reaper interval too low; clamping", "configured", interval, "using", minReaperInterval)
+		interval = minReaperInterval
+	}
 	return &Reaper{
 		registry: registry,
 		teardown: teardown,

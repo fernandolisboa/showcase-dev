@@ -85,6 +85,8 @@ func parseServiceRequestCounts(r io.Reader) (map[string]uint64, error) {
 			continue
 		}
 		// The sample value is the last whitespace-separated field on the line.
+		// Traefik's Prometheus exposition emits no trailing OpenMetrics timestamp,
+		// so the last field is the value, not a timestamp.
 		fields := strings.Fields(line)
 		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
 		if err != nil {

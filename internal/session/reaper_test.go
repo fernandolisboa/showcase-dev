@@ -61,11 +61,19 @@ func (r *recordingTeardown) teardown(_ context.Context, id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fail != nil {
+		// Mirror runner.Compose.Teardown: a failed `compose down` leaves the route
+		// in the registry (the Session stays visible for retry).
 		return r.fail
 	}
 	r.ids = append(r.ids, id)
 	r.reg.Remove(id)
 	return nil
+}
+
+func (r *recordingTeardown) setFail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fail = err
 }
 
 func (r *recordingTeardown) tornDown() []string {
@@ -254,8 +262,21 @@ func TestReaperRetriesAfterTeardownFailure(t *testing.T) {
 
 	r.tick(context.Background())
 	clk.advance(11 * time.Minute)
-	r.tick(context.Background()) // teardown fails: session stays tracked for retry
+	r.tick(context.Background()) // teardown fails: session stays tracked AND present
 	if _, ok := r.tracked["stubborn"]; !ok {
-		t.Error("a session whose teardown failed should remain tracked for retry")
+		t.Fatal("a session whose teardown failed should remain tracked for retry")
+	}
+	if _, ok := reg.Get("stubborn"); !ok {
+		t.Fatal("a failed teardown must leave the route in the registry so the reap is retried")
+	}
+
+	// Next tick the teardown succeeds: the reap is retried and the session removed.
+	td.setFail(nil)
+	r.tick(context.Background())
+	if got := td.tornDown(); len(got) != 1 || got[0] != "stubborn" {
+		t.Fatalf("retry should tear the session down, got %v", got)
+	}
+	if _, ok := r.tracked["stubborn"]; ok {
+		t.Error("a successfully retried session should be untracked")
 	}
 }
