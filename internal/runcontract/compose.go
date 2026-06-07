@@ -10,7 +10,9 @@ func (p ExecutionPlan) ToCompose() ([]byte, error) {
 	file := composeFile{
 		Name:     p.Project,
 		Services: make(map[string]composeService, len(p.Services)),
-		Networks: map[string]composeNetwork{p.Network.Name: {Internal: p.Network.Internal}},
+		// Set the network's explicit name so Docker uses it verbatim (no project
+		// prefix) — the Runner and proxy attach to it by that name (ADR-0009).
+		Networks: map[string]composeNetwork{p.Network.Name: {Name: p.Network.Name, Internal: p.Network.Internal}},
 	}
 	if len(p.Volumes) > 0 {
 		file.Volumes = make(map[string]composeVolume, len(p.Volumes))
@@ -114,7 +116,8 @@ type composeHealthcheck struct {
 }
 
 type composeNetwork struct {
-	Internal bool `yaml:"internal,omitempty"`
+	Name     string `yaml:"name,omitempty"`
+	Internal bool   `yaml:"internal,omitempty"`
 }
 
 type composeVolume struct{}
