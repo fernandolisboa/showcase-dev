@@ -257,6 +257,9 @@ func TestPlayHandlerAtCapacityReturns503(t *testing.T) {
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("missing Retry-After header on an at-capacity response")
 	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
 	var body map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("bad json: %v", err)
