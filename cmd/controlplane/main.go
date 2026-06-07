@@ -86,14 +86,33 @@ func main() {
 	// The Runner boots Sessions and keeps the proxy registry current; the session
 	// Manager turns a Guest "play" into a live Session asynchronously (#10). The MVP
 	// plays one hand-configured fixture Project.
-	sessions := session.NewManager(
-		runner.NewCompose(
-			runner.StaticSource{P: runner.FixtureProject()},
-			runner.WithRuntime(cfg.Runtime),
-			runner.WithProxy(registry, cfg.TraefikContainer),
-		),
-		registry, cfg.DemoScheme, logger,
+	compose := runner.NewCompose(
+		runner.StaticSource{P: runner.FixtureProject()},
+		runner.WithRuntime(cfg.Runtime),
+		runner.WithProxy(registry, cfg.TraefikContainer),
 	)
+	sessions := session.NewManager(compose, registry, cfg.DemoScheme, logger)
+
+	// The reaper tears Sessions down on idle and at the max-runtime cap (ADR-0006).
+	// Its idle signal is Traefik's per-Session request counter, polled over host
+	// loopback so the control plane observes Guest activity without sitting on the
+	// Guest data path (ADR-0004); the Runner's Teardown destroys the Stack. It runs
+	// for the life of the process and is cancelled+drained at shutdown (below).
+	reaper := session.NewReaper(
+		registry, compose.Teardown, proxy.NewTraefikMetrics(cfg.TraefikMetricsURL),
+		cfg.IdleTimeout, cfg.MaxRuntime, cfg.ReaperInterval, logger,
+	)
+	reaperCtx, stopReaper := context.WithCancel(context.Background())
+	reaperDone := make(chan struct{})
+	go func() {
+		defer close(reaperDone)
+		reaper.Run(reaperCtx)
+	}()
+	defer func() {
+		stopReaper()
+		<-reaperDone
+	}()
+	logger.Info("session reaper started", "idle", cfg.IdleTimeout, "max_runtime", cfg.MaxRuntime, "interval", cfg.ReaperInterval)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),

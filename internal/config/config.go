@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config is the resolved control-plane configuration.
@@ -48,6 +49,22 @@ type Config struct {
 	TraefikContainer string
 	// DemoScheme is the URL scheme for Session links ("http" dev, "https" prod).
 	DemoScheme string
+	// IdleTimeout tears down a Session after this long with no Guest activity —
+	// the primary cost lever (ADR-0006). Activity is Traefik per-Session request
+	// counts (TraefikMetricsURL); when metrics are unavailable, idle teardown is
+	// skipped that tick (MaxRuntime still applies).
+	IdleTimeout time.Duration
+	// MaxRuntime is the hard absolute cap on a Session's lifetime regardless of
+	// activity, so a forgotten tab can't run forever (ADR-0006). It is the
+	// unconditional backstop and needs no activity signal.
+	MaxRuntime time.Duration
+	// ReaperInterval is how often the teardown reaper scans Sessions. It bounds the
+	// granularity of both timeouts above.
+	ReaperInterval time.Duration
+	// TraefikMetricsURL is the Traefik Prometheus metrics endpoint the reaper polls
+	// for per-Session request counts (the idle activity signal). It must be reached
+	// off the Guest data path — see cmd/controlplane and deploy/traefik (ADR-0004).
+	TraefikMetricsURL string
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -65,6 +82,10 @@ func Load() Config {
 		Runtime:           getenv("RUNTIME", "runsc"),
 		TraefikContainer:  getenv("TRAEFIK_CONTAINER", "showcase-traefik"),
 		DemoScheme:        getenv("DEMO_SCHEME", "http"),
+		IdleTimeout:       getenvDuration("IDLE_TIMEOUT", 15*time.Minute),
+		MaxRuntime:        getenvDuration("MAX_RUNTIME", 45*time.Minute),
+		ReaperInterval:    getenvDuration("REAPER_INTERVAL", 30*time.Second),
+		TraefikMetricsURL: getenv("TRAEFIK_METRICS_URL", "http://127.0.0.1:8084/metrics"),
 	}
 }
 
@@ -84,6 +105,17 @@ func getenvInt(key string, fallback int) int {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+// getenvDuration parses a Go duration string (e.g. "15m", "45s"); a missing or
+// malformed value falls back, so a typo can't silently disable a teardown timer.
+func getenvDuration(key string, fallback time.Duration) time.Duration {
+	if v, ok := os.LookupEnv(key); ok {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
 		}
 	}
 	return fallback

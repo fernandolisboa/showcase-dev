@@ -1,6 +1,26 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+func TestTeardownTunablesParseAndDefault(t *testing.T) {
+	t.Setenv("IDLE_TIMEOUT", "12m")
+	t.Setenv("MAX_RUNTIME", "90m")
+	t.Setenv("REAPER_INTERVAL", "garbage") // malformed must fall back, not disable
+
+	cfg := Load()
+	if cfg.IdleTimeout != 12*time.Minute {
+		t.Errorf("IdleTimeout = %v, want 12m", cfg.IdleTimeout)
+	}
+	if cfg.MaxRuntime != 90*time.Minute {
+		t.Errorf("MaxRuntime = %v, want 90m", cfg.MaxRuntime)
+	}
+	if cfg.ReaperInterval != 30*time.Second {
+		t.Errorf("ReaperInterval = %v, want default 30s on garbage input", cfg.ReaperInterval)
+	}
+}
 
 func TestLoadReadsEnv(t *testing.T) {
 	t.Setenv("HOST", "127.0.0.1")

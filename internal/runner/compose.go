@@ -159,14 +159,23 @@ func (c *Compose) Teardown(ctx context.Context, sessionID string) error {
 		return err
 	}
 	project := ProjectName(sessionID)
+	// Detach Traefik first: `down` removes the Session network, which fails while an
+	// external endpoint (Traefik) is still connected.
 	if c.registry != nil {
-		c.registry.Remove(sessionID)
 		c.detachProxy(ctx, sessionID)
 	}
 	out, err := c.compose(ctx, project, "down", "-v", "--remove-orphans")
 	_ = os.RemoveAll(filepath.Join(c.workdir, project))
 	if err != nil {
+		// Leave the route in place on failure: a Session whose Stack did NOT come
+		// down must stay visible (in the registry, and so to the reaper) to be
+		// retried, rather than being dropped while its containers leak (ADR-0006).
+		// The boot-failure path drops the route separately (session.Manager.boot),
+		// so this only affects retryable teardowns.
 		return fmt.Errorf("compose down: %w\n%s", err, out)
+	}
+	if c.registry != nil {
+		c.registry.Remove(sessionID)
 	}
 	return nil
 }
