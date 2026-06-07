@@ -12,11 +12,13 @@ help: ## Show this help
 		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 # --- Go (control plane) ------------------------------------------------------
-.PHONY: go-build go-test go-lint tidy
+.PHONY: go-build go-test integration go-lint tidy
 go-build: ## Build the control-plane binary (embeds current internal/web/dist)
 	go build -o $(BIN) ./cmd/controlplane
-go-test: ## Run Go tests
+go-test: ## Run Go unit tests
 	go test -race $(GO_PKGS)
+integration: ## Run Seam-2 integration tests (requires Docker)
+	go test -tags integration -timeout 300s $(GO_PKGS)
 go-lint: ## Vet Go (plus golangci-lint if installed)
 	go vet $(GO_PKGS)
 	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run $(GO_PKGS) || echo "golangci-lint not installed; ran go vet only"
