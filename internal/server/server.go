@@ -1,0 +1,53 @@
+// Package server wires the control-plane HTTP routes: liveness, the (future)
+// control-plane API under /api, and the embedded React SPA for everything else.
+package server
+
+import (
+	"log/slog"
+	"net/http"
+	"runtime/debug"
+
+	"github.com/fernandolisboa/showcase-dev/internal/config"
+	"github.com/fernandolisboa/showcase-dev/internal/web"
+)
+
+// New builds the control-plane HTTP handler.
+func New(logger *slog.Logger, _ config.Config) http.Handler {
+	mux := http.NewServeMux()
+
+	// Liveness. Readiness (incl. the DB check) lands with the write-model slice.
+	mux.HandleFunc("GET /healthz", health)
+
+	// The control-plane API surface mounts under /api in later slices.
+
+	// Everything else is the embedded React SPA.
+	mux.Handle("/", web.Handler())
+
+	// recoverer sits inside requestLogger so a panicking request is turned into a
+	// 500 before control returns to the logger, and is therefore still logged.
+	return requestLogger(logger, recoverer(logger, mux))
+}
+
+// requestLogger logs one line per request after it is served.
+func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		logger.Info("request", "method", r.Method, "path", r.URL.Path)
+	})
+}
+
+// recoverer turns a handler panic into a 500 so a single panicking request never
+// crashes the single-process control plane (one process per VM, ADR-0009).
+func recoverer(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.Error("panic recovered",
+					"method", r.Method, "path", r.URL.Path,
+					"panic", rec, "stack", string(debug.Stack()))
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}

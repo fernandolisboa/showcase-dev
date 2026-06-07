@@ -1,0 +1,2 @@
+# Placeholder so `//go:embed all:dist` compiles before the first web build.
+# The real Vite build (web/vite.config.ts) writes its output here.
