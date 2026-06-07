@@ -132,7 +132,9 @@ func (b *Builder) removeImage(ctx context.Context, tag, why string) {
 }
 
 // shortVersion trims a long version (e.g. a sha256 hex digest) to a tag-friendly
-// length; short versions pass through unchanged.
+// length; short versions pass through unchanged. Versions are content hashes / git
+// shas, not adversarial input, so a 12-hex-char (48-bit) prefix collision — which
+// would alias two versions to one tag — is not a practical concern.
 func shortVersion(v string) string {
 	const n = 12
 	if len(v) > n {

@@ -24,7 +24,10 @@ func (f *fakeBuilder) Build(_ context.Context, spec BuildSpec) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
-	return f.tag, nil
+	if f.tag != "" {
+		return f.tag, nil
+	}
+	return spec.ImageName + ":built", nil // distinct tag per service
 }
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -46,6 +49,36 @@ func TestBuildingSourceSwapsInBuiltTags(t *testing.T) {
 	}
 	if len(fb.specs) != 1 || fb.specs[0].ImageName != "showcase/fixture-web" {
 		t.Errorf("unexpected build specs: %+v", fb.specs)
+	}
+}
+
+func TestBuildingSourceBuildsEveryServiceSoSeedIsCovered(t *testing.T) {
+	// A Seed reuses a declared service's image (manifest validation guarantees
+	// seed.service is declared). Building every declared service must therefore
+	// also supply the seed's image — runcontract.Compile needs it.
+	base := runner.StaticSource{P: runner.Project{
+		Manifest: runcontract.Manifest{
+			Services: []runcontract.Service{{Name: "web"}, {Name: "api"}},
+			Seed:     &runcontract.Seed{Service: "api", Command: []string{"true"}},
+		},
+		Images: map[string]string{},
+	}}
+	fb := &fakeBuilder{}
+	spec := func(_ string, svc runcontract.Service) (BuildSpec, error) {
+		return BuildSpec{ImageName: "showcase/" + svc.Name, Version: "v1"}, nil
+	}
+	src := NewBuildingSource(base, fb, spec, discardLogger())
+
+	p, err := src.Project(context.Background(), "fixture")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if p.Images["web"] == "" || p.Images["api"] == "" {
+		t.Errorf("every declared service must be built; got %v", p.Images)
+	}
+	// The seed reuses "api", which is built — so Compile would find its image.
+	if p.Images[p.Manifest.Seed.Service] == "" {
+		t.Error("seed service image must be present (it reuses a declared service)")
 	}
 }
 

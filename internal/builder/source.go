@@ -46,6 +46,9 @@ func (s *BuildingSource) Project(ctx context.Context, projectID string) (runner.
 		return runner.Project{}, err
 	}
 
+	// Build every declared service. A Seed reuses a declared service's image
+	// (manifest validation requires seed.service to be a declared service), so
+	// building all services also supplies the seed's image — no special case.
 	images := make(map[string]string, len(p.Manifest.Services))
 	for _, svc := range p.Manifest.Services {
 		spec, err := s.spec(projectID, svc)

@@ -139,6 +139,28 @@ func TestBuildLRUEvictsColdestOverCap(t *testing.T) {
 	_ = aTag
 }
 
+func TestRebuildFailureKeepsPreviousImage(t *testing.T) {
+	// A failed rebuild (new version) must leave the last-good image cached and
+	// NOT invalidate it — the platform keeps serving the previous build.
+	d := &fakeDocker{}
+	b := newTestBuilder(d, 10)
+	var calls int
+
+	good, _ := b.Build(context.Background(), spec("showcase/x", "v1", &calls))
+
+	d.failOn = "showcase/x" // the next build (v2) fails
+	if _, err := b.Build(context.Background(), spec("showcase/x", "v2", &calls)); err == nil {
+		t.Fatal("expected the rebuild to fail")
+	}
+
+	if len(d.removed) != 0 {
+		t.Errorf("a failed rebuild must not invalidate the good image; removed = %v", d.removed)
+	}
+	if e, ok := b.cache["showcase/x"]; !ok || e.tag != good || e.version != "v1" {
+		t.Errorf("cache should still hold the last-good v1 build, got %+v ok=%v", e, ok)
+	}
+}
+
 func TestBuildFailureReturnsErrorWithOutput(t *testing.T) {
 	d := &fakeDocker{failOn: "showcase/bad"}
 	b := newTestBuilder(d, 10)
