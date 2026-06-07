@@ -29,7 +29,7 @@ func TestPlayBootsSessionToLive(t *testing.T) {
 		runner.WithRuntime("runc"),
 		runner.WithProxy(reg, ""),
 	)
-	m := NewManager(r, reg, "http", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m := NewManager(r, reg, "http", 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	sess, err := m.Play("fixture")
 	if err != nil {
