@@ -52,6 +52,10 @@ func TestStateByHost(t *testing.T) {
 	if st, ok := reg.StateByHost("s-dead.run.demo.app:443"); !ok || st != Crashed {
 		t.Errorf("dead host (with port): state=%v ok=%v, want Crashed,true", st, ok)
 	}
+	// Hostnames are case-insensitive: a mixed-case Host must still resolve.
+	if st, ok := reg.StateByHost("S-ABC.RUN.DEMO.APP"); !ok || st != Booting {
+		t.Errorf("mixed-case host: state=%v ok=%v, want Booting,true", st, ok)
+	}
 	if _, ok := reg.StateByHost("s-missing.run.demo.app"); ok {
 		t.Error("unknown session should report ok=false")
 	}

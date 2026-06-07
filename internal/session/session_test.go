@@ -313,6 +313,11 @@ func TestShutdownCancelsAndDrainsInflightBoots(t *testing.T) {
 	default:
 		t.Error("Shutdown returned before the aborted boot drained its teardown")
 	}
+	// A boot cancelled by shutdown is NOT a demo failure: the route is dropped, not
+	// left lingering in Failed (#13 shutdown-vs-failure distinction).
+	if _, ok := reg.Get(sess.ID); ok {
+		t.Error("a shutdown-cancelled boot should drop its route, not leave it Failed")
+	}
 }
 
 // TestShutdownDeadlineExceededWhenBootHangs proves the drain is bounded: if a boot
