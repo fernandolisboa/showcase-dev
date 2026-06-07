@@ -112,7 +112,9 @@ func TestBuildMultiServiceFromSourceThenBoot(t *testing.T) {
 	}
 
 	// The injected creds authenticate against the per-Session DB: a sidecar on the
-	// Session network connects with the API's own DSN and runs a query.
+	// Session network connects with the API's own DSN and runs a query. postgres:17
+	// is already cached locally (the DB just booted from it), which matters because
+	// the Session network is internal (no egress) and couldn't pull it.
 	out, err := exec.CommandContext(ctx, "docker", "run", "--rm", "--network", network,
 		"postgres:17", "psql", dsn, "-tAc", "SELECT 1").CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != "1" {
@@ -122,12 +124,17 @@ func TestBuildMultiServiceFromSourceThenBoot(t *testing.T) {
 	// Runner's own integration test, TestProvisionBootsReachableStackThenTeardownLeavesNothing.)
 }
 
-// dockerOut runs a docker command and returns stdout, failing the test on error.
+// dockerOut runs a docker command and returns stdout, failing the test on error
+// with docker's stderr included for diagnostics.
 func dockerOut(ctx context.Context, t *testing.T, args ...string) string {
 	t.Helper()
 	out, err := exec.CommandContext(ctx, "docker", args...).Output()
 	if err != nil {
-		t.Fatalf("docker %s: %v", strings.Join(args, " "), err)
+		var stderr []byte
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = ee.Stderr
+		}
+		t.Fatalf("docker %s: %v\n%s", strings.Join(args, " "), err, stderr)
 	}
 	return string(out)
 }
