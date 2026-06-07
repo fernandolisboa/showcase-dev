@@ -32,6 +32,14 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	cfg := config.Load()
 
+	// ADR-0004 mandates HTTPS for Session URLs (the .app TLD is HSTS-preloaded). A
+	// prod deploy that forgets DEMO_SCHEME=https would mint http:// links; warn
+	// loudly rather than silently hand out non-TLS Demo URLs.
+	if cfg.Env == "prod" && cfg.DemoScheme != "https" {
+		logger.Warn("DEMO_SCHEME is not https in prod; Session URLs will be non-TLS (ADR-0004 expects https)",
+			"demo_scheme", cfg.DemoScheme)
+	}
+
 	// Traefik-facing surface, split across two listeners so a Demo can never reach
 	// the control plane (ADR-0004). Both bind cfg.InternalHost (default 127.0.0.1),
 	// off the public app port and off every Session-reachable interface; the Runner
@@ -97,7 +105,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, stop, logger, srv, cfg.Addr(), cfg.Env); err != nil {
+	if err := run(ctx, stop, logger, srv, sessions, cfg.Addr(), cfg.Env); err != nil {
 		os.Exit(1)
 	}
 }
@@ -106,7 +114,7 @@ func main() {
 // shuts down gracefully. It returns a non-nil error when the server failed to
 // run — a failed bind (port in use) must surface as a non-zero exit, otherwise a
 // control plane that never came up looks like a clean start to a supervisor.
-func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv *http.Server, addr, env string) error {
+func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv *http.Server, sessions *session.Manager, addr, env string) error {
 	// serveErr carries a fatal listen error back to the main path. It is buffered
 	// so the goroutine never blocks, and the send happens-before stop(), which the
 	// <-ctx.Done() below synchronizes on.
@@ -128,6 +136,14 @@ func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "err", err)
 		return err
+	}
+
+	// The HTTP server is drained, so no new /api/play can start a boot. Now cancel
+	// and drain the boots already in flight: each aborted `compose up` runs its
+	// teardown, so SIGTERM mid-boot leaves no orphaned containers/networks
+	// (ADR-0006). Bounded by the same shutdown deadline.
+	if err := sessions.Shutdown(shutdownCtx); err != nil {
+		logger.Error("session drain incomplete", "err", err)
 	}
 
 	// A signal-driven shutdown is success; a shutdown forced by a server error is not.

@@ -118,8 +118,14 @@ func (c *Compose) Provision(ctx context.Context, projectID, sessionID string) (s
 		return "", fmt.Errorf("write compose: %w", err)
 	}
 
-	// Register the Session as booting so the proxy serves the splash while it
-	// boots; the backends become reachable once it goes live (ADR-0004).
+	// Register the Session's backends so they're staged on the route and become
+	// reachable the moment Promote flips it Live (ADR-0004). When a session.Manager
+	// drives this Runner it has already Added the id as a placeholder (so the route
+	// exists synchronously before Play returns); this Add overwrites that
+	// placeholder while still Booting — a no-op for routing, since Booting routes
+	// ignore backends. This Add is also what registers the route when the Runner is
+	// driven standalone (no Manager — see the runner integration tests), so it
+	// can't be removed without breaking that path.
 	if c.registry != nil {
 		ui, apis := sessionBackends(proj, sessionID)
 		c.registry.Add(sessionID, ui, apis)
