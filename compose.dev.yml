@@ -1,0 +1,21 @@
+# Local development database only. Production Postgres and the Session runtime
+# are separate concerns (ADR-0009: a single Azure VM running Docker + gVisor).
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: showcase
+      POSTGRES_PASSWORD: showcase
+      POSTGRES_DB: showcase
+    ports:
+      - "5432:5432"
+    volumes:
+      - showcase-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U showcase"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  showcase-pgdata:

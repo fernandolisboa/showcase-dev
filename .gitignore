@@ -1,0 +1,21 @@
+# Go
+/bin/
+*.out
+coverage.*
+
+# The Go binary embeds internal/web/dist; keep only the placeholder so a bare
+# `go build` works before the first web build. The real Vite output is ignored.
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
+
+# Node / web
+node_modules/
+
+# Env / secrets (real secrets come from Azure Key Vault in prod — ADR-0009)
+.env
+*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,5 @@
+# Optional: install golangci-lint to get richer linting than `go vet`.
+# `make go-lint` runs it when present; CI relies on `go vet` to stay boring.
+version: "2"
+run:
+  timeout: 5m
