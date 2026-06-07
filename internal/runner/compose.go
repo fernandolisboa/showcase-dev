@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 )
@@ -86,7 +87,7 @@ func (c *Compose) Provision(ctx context.Context, projectID, sessionID string) (s
 		return "", fmt.Errorf("resolve project %q: %w", projectID, err)
 	}
 
-	plan, url, err := c.buildPlan(proj, sessionID)
+	plan, url, secrets, err := c.buildPlan(proj, sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -108,7 +109,10 @@ func (c *Compose) Provision(ctx context.Context, projectID, sessionID string) (s
 		"-f", file, "up", "-d", "--wait", "--wait-timeout", c.bootLimit); err != nil {
 		// Best-effort cleanup so a half-booted Stack leaves nothing behind.
 		_ = c.Teardown(context.WithoutCancel(ctx), sessionID)
-		return "", fmt.Errorf("compose up: %w\n%s", err, out)
+		// Postgres/compose can echo env (incl. POSTGRES_PASSWORD) on an init
+		// failure; ADR-0006 routes this output to the Owner, so scrub minted
+		// secrets before surfacing.
+		return "", fmt.Errorf("compose up: %w\n%s", err, scrubSecrets(string(out), secrets))
 	}
 	return url, nil
 }
@@ -129,8 +133,9 @@ func (c *Compose) Teardown(ctx context.Context, sessionID string) error {
 }
 
 // buildPlan mints any per-Session secrets and compiles the locked-down plan. It
-// returns the plan and the UI's in-network URL.
-func (c *Compose) buildPlan(proj Project, sessionID string) (runcontract.ExecutionPlan, string, error) {
+// returns the plan, the UI's in-network URL, and the minted secret values so the
+// caller can scrub them from any surfaced compose output.
+func (c *Compose) buildPlan(proj Project, sessionID string) (runcontract.ExecutionPlan, string, []string, error) {
 	opts := runcontract.Options{
 		Project:     ProjectName(sessionID),
 		NetworkName: NetworkName(sessionID),
@@ -145,21 +150,27 @@ func (c *Compose) buildPlan(proj Project, sessionID string) (runcontract.Executi
 		}
 	}
 
+	var secrets []string
 	if proj.Manifest.DB != nil {
-		creds := runcontract.DBCreds{User: "showcase", Password: randToken(16), Database: "showcase"}
+		password, err := randToken(16)
+		if err != nil {
+			return runcontract.ExecutionPlan{}, "", nil, fmt.Errorf("mint db password: %w", err)
+		}
+		creds := runcontract.DBCreds{User: "showcase", Password: password, Database: "showcase"}
 		opts.DBCreds = creds
+		secrets = append(secrets, password)
 		platformEnv, err := resolvePlatformEnv(proj.Manifest, creds)
 		if err != nil {
-			return runcontract.ExecutionPlan{}, "", err
+			return runcontract.ExecutionPlan{}, "", nil, err
 		}
 		opts.PlatformEnv = platformEnv
 	}
 
 	plan, err := runcontract.Compile(proj.Manifest, opts)
 	if err != nil {
-		return runcontract.ExecutionPlan{}, "", err
+		return runcontract.ExecutionPlan{}, "", nil, err
 	}
-	return plan, url, nil
+	return plan, url, secrets, nil
 }
 
 // resolvePlatformEnv mints values for the Manifest's platform-sourced env vars.
@@ -204,8 +215,25 @@ func (c *Compose) compose(ctx context.Context, project string, args ...string) (
 	return exec.CommandContext(ctx, "docker", full...).CombinedOutput()
 }
 
-func randToken(n int) string {
+// scrubSecrets replaces every occurrence of each secret value in s with a
+// redaction marker, so plaintext creds never reach a surfaced error or log.
+func scrubSecrets(s string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, secret, "[REDACTED]")
+	}
+	return s
+}
+
+// randToken returns n bytes of crypto/rand entropy, hex-encoded. It fails closed:
+// a rand.Read error is propagated so a secret is never minted from a degraded
+// (e.g. all-zero) buffer.
+func randToken(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }

@@ -21,7 +21,7 @@ func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 	defer cancel()
 
 	r := NewCompose(StaticSource{P: FixtureProject()}, WithRuntime("runc"))
-	sessionID := "it" + randToken(6)
+	sessionID := "it" + mustToken(t, 6)
 	project, network := ProjectName(sessionID), NetworkName(sessionID)
 	// Safety net even if an assertion fails mid-test.
 	t.Cleanup(func() { _ = r.Teardown(context.Background(), sessionID) })
@@ -58,6 +58,51 @@ func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 	if got := dockerOut(t, "volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+project); got != "" {
 		t.Errorf("leaked volumes after teardown: %q", got)
 	}
+}
+
+// TestProvisionFailedBootLeavesNothing exercises the ADR-0006 fail-graceful path:
+// a boot that can never succeed (a bogus image ref) must surface an error and
+// leave zero containers, network, or volumes behind.
+func TestProvisionFailedBootLeavesNothing(t *testing.T) {
+	requireDocker(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	// Same fixture, but the app image can't be pulled, so `up --wait` fails.
+	proj := FixtureProject()
+	proj.Images = map[string]string{"web": "showcase-dev/does-not-exist:nope"}
+
+	r := NewCompose(StaticSource{P: proj}, WithRuntime("runc"))
+	sessionID := "itfail" + mustToken(t, 6)
+	project, network := ProjectName(sessionID), NetworkName(sessionID)
+	// Safety net in case the provision unexpectedly succeeds or partially boots.
+	t.Cleanup(func() { _ = r.Teardown(context.Background(), sessionID) })
+
+	if _, err := r.Provision(ctx, "fixture", sessionID); err == nil {
+		t.Fatal("expected provision to fail on a bogus image ref")
+	}
+
+	// Fail-graceful: the failed boot must have torn itself down completely.
+	if got := dockerOut(t, "ps", "-aq", "--filter", "label=com.docker.compose.project="+project); got != "" {
+		t.Errorf("leaked containers after failed boot: %q", got)
+	}
+	if got := dockerOut(t, "network", "ls", "--format", "{{.Name}}", "--filter", "name=^"+network+"$"); got != "" {
+		t.Errorf("leaked network after failed boot: %q", got)
+	}
+	if got := dockerOut(t, "volume", "ls", "-q", "--filter", "label=com.docker.compose.project="+project); got != "" {
+		t.Errorf("leaked volumes after failed boot: %q", got)
+	}
+}
+
+// mustToken returns a random hex token or fails the test — keeps callers terse.
+func mustToken(t *testing.T, n int) string {
+	t.Helper()
+	tok, err := randToken(n)
+	if err != nil {
+		t.Fatalf("randToken: %v", err)
+	}
+	return tok
 }
 
 func requireDocker(t *testing.T) {

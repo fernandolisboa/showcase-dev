@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
@@ -33,9 +34,12 @@ func TestValidateSessionID(t *testing.T) {
 func TestBuildPlanWiring(t *testing.T) {
 	c := NewCompose(StaticSource{P: FixtureProject()}, WithRuntime("runc"))
 
-	plan, url, err := c.buildPlan(FixtureProject(), "abc123")
+	plan, url, secrets, err := c.buildPlan(FixtureProject(), "abc123")
 	if err != nil {
 		t.Fatalf("buildPlan: %v", err)
+	}
+	if len(secrets) != 1 || secrets[0] == "" {
+		t.Errorf("secrets = %v, want one non-empty minted db password", secrets)
 	}
 	if plan.Project != "s-abc123" {
 		t.Errorf("project = %q", plan.Project)
@@ -80,11 +84,32 @@ func TestResolvePlatformEnv(t *testing.T) {
 }
 
 func TestRandTokenIsRandomHex(t *testing.T) {
-	a, b := randToken(16), randToken(16)
+	a, err := randToken(16)
+	if err != nil {
+		t.Fatalf("randToken: %v", err)
+	}
+	b, err := randToken(16)
+	if err != nil {
+		t.Fatalf("randToken: %v", err)
+	}
 	if len(a) != 32 {
 		t.Errorf("len = %d, want 32 hex chars", len(a))
 	}
 	if a == b {
 		t.Error("two tokens should differ")
+	}
+}
+
+func TestScrubSecretsRedactsMintedValues(t *testing.T) {
+	out := "POSTGRES_PASSWORD=deadbeefcafef00d failed to init\nother line"
+	got := scrubSecrets(out, []string{"deadbeefcafef00d", ""})
+	if strings.Contains(got, "deadbeefcafef00d") {
+		t.Errorf("secret not redacted: %q", got)
+	}
+	if !strings.Contains(got, "[REDACTED]") {
+		t.Errorf("missing redaction marker: %q", got)
+	}
+	if !strings.Contains(got, "other line") {
+		t.Errorf("non-secret text dropped: %q", got)
 	}
 }
