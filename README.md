@@ -68,10 +68,12 @@ is healthy, then the live Demo, with same-origin `/api`.
 ```bash
 # Dev only: bind the internal listeners to the bridge gateway so the Traefik
 # container (which reaches the host via host.docker.internal) can poll them.
-INTERNAL_HOST=0.0.0.0 INTERNAL_PORT=8081 SPLASH_PORT=8082 make run
+RUNTIME=runc DEMO_SCHEME=http \
+  INTERNAL_HOST=0.0.0.0 INTERNAL_PORT=8081 SPLASH_PORT=8082 make run
 make proxy-up                 # Traefik in front of Sessions (deploy/traefik/)
-# A booted Session (Runner wired with WithProxy(registry, "showcase-traefik")) is
-# then reachable at  http://s-<id>.run.localhost   (*.localhost -> 127.0.0.1)
+# Open http://localhost:8080/demo and press ▶ Play: the spin-up API starts a
+# Session and sends you to http://s-<id>.run.localhost — the booting page, then
+# the live Demo (*.localhost -> 127.0.0.1). Each visitor gets their own Session.
 make proxy-down
 ```
 
@@ -92,7 +94,10 @@ Traefik + control plane co-located on one VM (ADR-0009): Traefik reaches the con
 endpoint over loopback, and binding `127.0.0.1` keeps it off the public interface
 and unreachable from any Session container. Dev runs Traefik in a container that
 reaches the host over the Docker bridge gateway, so dev sets `INTERNAL_HOST=0.0.0.0`
-(above) — the structural splash/config split is what enforces ADR-0004 even then.
+(above). ⚠️ **Dev is not a trust boundary:** with `0.0.0.0` a Session container can
+reach the config endpoint directly over the bridge gateway, bypassing the
+splash/config split. That split + the `127.0.0.1` default are what enforce ADR-0004
+in **prod**; never run prod with `INTERNAL_HOST=0.0.0.0`.
 **Production** additionally swaps the dev config for a `websecure` entrypoint with
 an ACME **DNS-01 wildcard cert** for `*.run.<demo-domain>` on **Cloudflare**
 (Traefik ships the provider in-binary; config-only) — see
