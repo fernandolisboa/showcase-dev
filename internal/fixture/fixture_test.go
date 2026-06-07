@@ -4,49 +4,66 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 )
 
-func TestVersionStableAndNonEmpty(t *testing.T) {
-	v1, err := Version()
-	if err != nil {
-		t.Fatalf("version: %v", err)
+func TestManifestIsValidUIPlusAPI(t *testing.T) {
+	m := Manifest()
+	if err := m.Validate(); err != nil {
+		t.Fatalf("fixture manifest must be valid: %v", err)
 	}
-	if v1 == "" {
-		t.Fatal("version should not be empty")
+
+	var ui, api *runcontract.Service
+	for i := range m.Services {
+		switch m.Services[i].Role {
+		case runcontract.RoleUI:
+			ui = &m.Services[i]
+		case runcontract.RoleAPI:
+			api = &m.Services[i]
+		}
 	}
-	v2, err := Version()
-	if err != nil {
-		t.Fatalf("version (2nd): %v", err)
+	if ui == nil || api == nil {
+		t.Fatalf("expected one UI and one API service, got %+v", m.Services)
 	}
-	if v1 != v2 {
-		t.Errorf("version not stable: %q vs %q", v1, v2)
+	if api.PathPrefix != "/api" {
+		t.Errorf("API pathPrefix = %q, want /api (same-origin)", api.PathPrefix)
 	}
 }
 
-func TestExtractWritesBuildContext(t *testing.T) {
-	dir, cleanup, err := Extract()
+func TestVersionPerServiceStableAndDistinct(t *testing.T) {
+	web1, err := Version("web")
 	if err != nil {
-		t.Fatalf("extract: %v", err)
+		t.Fatalf("version web: %v", err)
 	}
-	defer cleanup()
+	web2, _ := Version("web")
+	if web1 != web2 {
+		t.Errorf("version not stable: %q vs %q", web1, web2)
+	}
+	api, err := Version("api")
+	if err != nil {
+		t.Fatalf("version api: %v", err)
+	}
+	if web1 == api {
+		t.Error("distinct services should hash to distinct versions")
+	}
+	if _, err := Version("nope"); err == nil {
+		t.Error("unknown service should error")
+	}
+}
 
-	for _, name := range []string{Dockerfile, "index.html"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("expected %s in build context: %v", name, err)
+func TestExtractPerService(t *testing.T) {
+	for _, svc := range []string{"web", "api"} {
+		dir, cleanup, err := Extract(svc)
+		if err != nil {
+			t.Fatalf("extract %s: %v", svc, err)
 		}
-	}
-
-	// The Dockerfile must reference busybox (sanity that the right context landed).
-	data, err := os.ReadFile(filepath.Join(dir, Dockerfile))
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	if len(data) == 0 {
-		t.Error("Dockerfile is empty")
-	}
-
-	cleanup()
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("cleanup should remove the temp dir, stat err = %v", err)
+		if _, err := os.Stat(filepath.Join(dir, Dockerfile)); err != nil {
+			t.Errorf("%s: expected Dockerfile in context: %v", svc, err)
+		}
+		cleanup()
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("%s: cleanup should remove the temp dir", svc)
+		}
 	}
 }
