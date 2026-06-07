@@ -92,7 +92,10 @@ Traefik + control plane co-located on one VM (ADR-0009): Traefik reaches the con
 endpoint over loopback, and binding `127.0.0.1` keeps it off the public interface
 and unreachable from any Session container. Dev runs Traefik in a container that
 reaches the host over the Docker bridge gateway, so dev sets `INTERNAL_HOST=0.0.0.0`
-(above) — the structural splash/config split is what enforces ADR-0004 even then.
+(above). ⚠️ **Dev is not a trust boundary:** with `0.0.0.0` a Session container can
+reach the config endpoint directly over the bridge gateway, bypassing the
+splash/config split. That split + the `127.0.0.1` default are what enforce ADR-0004
+in **prod**; never run prod with `INTERNAL_HOST=0.0.0.0`.
 **Production** additionally swaps the dev config for a `websecure` entrypoint with
 an ACME **DNS-01 wildcard cert** for `*.run.<demo-domain>` on **Cloudflare**
 (Traefik ships the provider in-binary; config-only) — see
