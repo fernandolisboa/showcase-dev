@@ -44,6 +44,9 @@ func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(con
 		mux.HandleFunc("GET /auth/github/callback", authn.Callback)
 		mux.HandleFunc("POST /logout", authn.Logout)
 		mux.HandleFunc("GET /api/owner/me", authn.Me)
+		// Claiming a username mutates Owner state, so it's gated behind a session
+		// (RequireOwner injects the Owner ClaimUsername reads from context).
+		mux.Handle("POST /api/owner/username", authn.RequireOwner(http.HandlerFunc(authn.ClaimUsername)))
 	}
 
 	// Everything else is the embedded React SPA.

@@ -26,6 +26,7 @@ func (noopStore) OwnerByLoginSession(context.Context, string) (store.Owner, erro
 	return store.Owner{}, store.ErrNotFound
 }
 func (noopStore) DeleteLoginSession(context.Context, string) error { return nil }
+func (noopStore) SetUsername(context.Context, int64, string) error { return nil }
 
 // When an Authenticator is wired, the Owner routes are mounted on the public mux:
 // /api/owner/me returns 401 (not the SPA 200 fallback) for an anonymous request,
