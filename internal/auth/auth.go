@@ -30,6 +30,7 @@ type SessionStore interface {
 	CreateLoginSession(ctx context.Context, tokenHash string, ownerID int64, expiresAt time.Time) error
 	OwnerByLoginSession(ctx context.Context, tokenHash string) (store.Owner, error)
 	DeleteLoginSession(ctx context.Context, tokenHash string) error
+	SetUsername(ctx context.Context, ownerID int64, username string) error
 }
 
 // Authenticator wires the OAuth provider to the session store and issues/validates
@@ -133,7 +134,10 @@ func (a *Authenticator) Me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"login": owner.GitHubLogin})
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"login":    owner.GitHubLogin,
+		"username": owner.Username, // "" until the Owner claims one (ADR-0005)
+	})
 }
 
 // RequireOwner gates a handler on a valid session, injecting the Owner into the

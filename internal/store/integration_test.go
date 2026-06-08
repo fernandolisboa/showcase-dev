@@ -104,6 +104,40 @@ func TestLoginSessionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestUsernameRoundTripAndUniqueness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	a, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+	b, _ := s.UpsertOwnerByGitHubID(ctx, 200, "bob")
+
+	if err := s.SetUsername(ctx, a.ID, "alice-dev"); err != nil {
+		t.Fatalf("set username: %v", err)
+	}
+	got, err := s.OwnerByUsername(ctx, "alice-dev")
+	if err != nil || got.ID != a.ID {
+		t.Fatalf("OwnerByUsername = (%+v, %v), want owner %d", got, err, a.ID)
+	}
+	if reloaded, _ := s.OwnerByID(ctx, a.ID); reloaded.Username != "alice-dev" {
+		t.Errorf("OwnerByID username = %q, want alice-dev", reloaded.Username)
+	}
+
+	// A second Owner cannot take the same username (the UNIQUE constraint, mapped
+	// to ErrUsernameTaken — exercises the real 23505 path the fakes can't).
+	if err := s.SetUsername(ctx, b.ID, "alice-dev"); !errors.Is(err, ErrUsernameTaken) {
+		t.Errorf("duplicate username = %v, want ErrUsernameTaken", err)
+	}
+
+	// An unknown username is ErrNotFound.
+	if _, err := s.OwnerByUsername(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("OwnerByUsername(missing) = %v, want ErrNotFound", err)
+	}
+}
+
 // A migration file edited after being applied must be rejected (append-only).
 func TestMigrateRejectsModifiedMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

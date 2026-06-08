@@ -25,12 +25,12 @@ func (s *Store) CreateLoginSession(ctx context.Context, tokenHash string, ownerI
 // the expired-row sweep removes it.
 func (s *Store) OwnerByLoginSession(ctx context.Context, tokenHash string) (Owner, error) {
 	const q = `
-SELECT o.id, o.github_user_id, o.github_login
+SELECT o.id, o.github_user_id, o.github_login, COALESCE(o.username, '')
 FROM login_sessions s
 JOIN owners o ON o.id = s.owner_id
 WHERE s.token_hash = $1 AND s.expires_at > now()`
 	var o Owner
-	err := s.pool.QueryRow(ctx, q, tokenHash).Scan(&o.ID, &o.GitHubUserID, &o.GitHubLogin)
+	err := s.pool.QueryRow(ctx, q, tokenHash).Scan(&o.ID, &o.GitHubUserID, &o.GitHubLogin, &o.Username)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Owner{}, ErrNotFound
 	}

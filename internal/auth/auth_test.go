@@ -14,13 +14,36 @@ import (
 
 // fakeStore is an in-memory SessionStore for handler tests (no database).
 type fakeStore struct {
-	owners   map[int64]store.Owner // by github user id
-	sessions map[string]int64      // token hash -> owner id
-	nextID   int64
+	owners    map[int64]store.Owner // by github user id
+	sessions  map[string]int64      // token hash -> owner id
+	usernames map[string]int64      // username -> owner id (uniqueness)
+	nextID    int64
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{owners: map[int64]store.Owner{}, sessions: map[string]int64{}}
+	return &fakeStore{
+		owners:    map[int64]store.Owner{},
+		sessions:  map[string]int64{},
+		usernames: map[string]int64{},
+	}
+}
+
+func (f *fakeStore) SetUsername(_ context.Context, ownerID int64, username string) error {
+	if other, taken := f.usernames[username]; taken && other != ownerID {
+		return store.ErrUsernameTaken
+	}
+	for gid, o := range f.owners {
+		if o.ID == ownerID {
+			if o.Username != "" {
+				delete(f.usernames, o.Username)
+			}
+			o.Username = username
+			f.owners[gid] = o
+			f.usernames[username] = ownerID
+			return nil
+		}
+	}
+	return store.ErrNotFound
 }
 
 func (f *fakeStore) UpsertOwnerByGitHubID(_ context.Context, gid int64, login string) (store.Owner, error) {
