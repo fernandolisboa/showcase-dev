@@ -40,6 +40,8 @@ type Store interface {
 	GetOwnerProject(ctx context.Context, ownerID int64, id string) (store.Project, error)
 	ListProjectsByOwner(ctx context.Context, ownerID int64) ([]store.Project, error)
 	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error
+	OwnerByUsername(ctx context.Context, username string) (store.Owner, error)
+	ListPublishedProjectsByUsername(ctx context.Context, username string) ([]store.Project, error)
 }
 
 // ProjectBuilder builds every service of a Project's manifest from source at publish,
@@ -220,6 +222,38 @@ func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 	p.CommitSHA = commitSHA
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(projectView(p))
+}
+
+// Portfolio is the PUBLIC listing of an Owner's published Projects at /{username}
+// (ADR-0005, AC4) — ungated, since a Portfolio is public. 404 if no Owner has
+// claimed the username (reserved names are never claimable, so they 404 here too);
+// otherwise the Owner's public identity plus their published Projects (possibly an
+// empty list). Each Project carries only id + name — enough for a Guest to play it.
+func (h *Handlers) Portfolio(w http.ResponseWriter, r *http.Request) {
+	username := strings.ToLower(strings.TrimSpace(r.PathValue("username")))
+	owner, err := h.store.OwnerByUsername(r.Context(), username)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	projects, err := h.store.ListPublishedProjectsByUsername(r.Context(), username)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	views := make([]map[string]any, 0, len(projects))
+	for _, p := range projects {
+		views = append(views, map[string]any{"id": p.ID, "name": p.Name})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"owner":    map[string]any{"username": owner.Username},
+		"projects": views,
+	})
 }
 
 // checkOwnerRepos enforces that every service's repo is the signed-in Owner's own

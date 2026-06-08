@@ -78,6 +78,12 @@ func (noopProjectStore) ListProjectsByOwner(context.Context, int64) ([]store.Pro
 	return nil, nil
 }
 func (noopProjectStore) PublishProject(context.Context, int64, string, string) error { return nil }
+func (noopProjectStore) OwnerByUsername(context.Context, string) (store.Owner, error) {
+	return store.Owner{}, store.ErrNotFound
+}
+func (noopProjectStore) ListPublishedProjectsByUsername(context.Context, string) ([]store.Project, error) {
+	return nil, nil
+}
 
 // With both an Authenticator and project Handlers wired, the Owner project routes
 // are mounted and gated: an anonymous request gets 401 (RequireOwner), not the SPA
@@ -100,6 +106,22 @@ func TestProjectRoutesMountedWhenPresent(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s = %d, want 401 (route mounted, anonymous)", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+// The Portfolio route is PUBLIC: an anonymous request reaches the handler (here the
+// noop store has no such Owner, so 404) rather than being gated (401) or falling
+// through to the SPA (200) — proving it's mounted and ungated.
+func TestPortfolioRouteIsPublicAndMounted(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	authn := auth.New(nil, noopStore{}, false)
+	projects := project.NewHandlers(noopProjectStore{}, nil)
+	h := New(logger, config.Config{}, nil, nil, authn, projects)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/portfolio/alice", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET /api/portfolio/alice = %d, want 404 (public route mounted, unknown user)", rec.Code)
 	}
 }
 
