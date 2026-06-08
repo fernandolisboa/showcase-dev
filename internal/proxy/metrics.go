@@ -20,12 +20,11 @@ import (
 // directly, and this is a side-channel pull, the same kind of call Traefik makes
 // against /traefik.
 //
-// Trust boundary (must close before untrusted Owner code — #14/#19): the metrics
-// endpoint, like Traefik's :80, is reachable by any container on a Session
-// network, and service-name labels embed Session ids. Today every Session runs
-// the same trusted fixture so there is no hostile reader; the URL is scraped over
-// host loopback only (deploy/traefik). Making the endpoint Session-unreachable is
-// tracked as a follow-up.
+// The endpoint embeds Session ids in its service labels, so it must stay
+// Session-unreachable: Traefik binds the metrics entryPoint to a static IP on its
+// own network and is published to host loopback only (deploy/traefik), so only the
+// control plane scrapes it — a container on a Session network cannot (#27,
+// ADR-0004). Enforced by the adversarial integration test in internal/runner.
 type TraefikMetrics struct {
 	url    string
 	client *http.Client

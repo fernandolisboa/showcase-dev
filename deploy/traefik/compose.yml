@@ -21,14 +21,41 @@ services:
     image: traefik:v3.7
     container_name: showcase-traefik
     command: ["--configFile=/etc/traefik/traefik.yml"]
+    networks:
+      # Pin Traefik to a static IP on its OWN network. The Runner attaches Traefik
+      # to each Session network at boot (compose.go attachProxy), AFTER this socket
+      # is bound — and the metrics entryPoint binds to this IP (traefik.yml), a NIC
+      # no Session is ever on, so a Session container can't reach :8084 (#27). The
+      # host-loopback publish below DNATs to this same IP (set at start, when only
+      # this network is attached), so the control-plane scrape is unchanged.
+      proxy:
+        ipv4_address: 192.168.218.10
     ports:
       - "80:80"
       # Prometheus metrics, bound to host loopback so only the control plane on the
       # host scrapes them (the idle signal for session teardown, ADR-0006) — not
-      # published to any public or Session-reachable interface.
+      # published to any public or Session-reachable interface. The container-side
+      # listener is further pinned to the proxy-network IP above (traefik.yml).
       - "127.0.0.1:8084:8084"
     volumes:
       - ./traefik.yml:/etc/traefik/traefik.yml:ro
     extra_hosts:
       # Lets Traefik reach the control plane running on the host (Linux + Desktop).
       - "host.docker.internal:host-gateway"
+
+networks:
+  # Traefik's own bridge, with a fixed subnet so the metrics entryPoint can bind a
+  # known IP (192.168.218.10). Sessions are never attached to this network — they
+  # get their own per-Session bridges — so this IP is unreachable from a Session.
+  #
+  # DEPLOY PRECONDITION: 192.168.218.0/24 must not overlap any existing route on
+  # the host — Docker's default pool (172.x, avoided here), another compose project,
+  # a corporate/WSL VPN route, or the prod VNet (ADR-0009's Azure VM). On overlap,
+  # `compose up` fails closed with a pool-overlap error (it does NOT weaken the
+  # isolation). To relocate, move this subnet AND the coupled metrics address in
+  # traefik.yml together.
+  proxy:
+    name: showcase-proxy
+    ipam:
+      config:
+        - subnet: 192.168.218.0/24

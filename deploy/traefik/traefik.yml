@@ -10,13 +10,18 @@ entryPoints:
   # Prometheus metrics, on their own entryPoint so they are never served on :80.
   # The control plane polls these for per-Session request counts (the idle signal
   # for session teardown, ADR-0006). Published to host loopback only (compose.yml)
-  # so the control plane on the host reaches it off the Guest data path. NOTE: like
-  # :80, this port is reachable by a container on a Session network, and service
-  # labels embed Session ids — harmless while every Session runs the same trusted
-  # fixture, but must be made Session-unreachable before untrusted Owner code
-  # (#14/#19); tracked as a follow-up.
+  # so the control plane on the host reaches it off the Guest data path.
+  #
+  # The address is pinned to Traefik's static IP on its OWN network (compose.yml,
+  # the `proxy` network) rather than ":8084": the Runner attaches Traefik to each
+  # Session network AFTER this socket is bound (compose.go attachProxy), and a
+  # socket bound to a specific IP never accepts on NICs joined later — so a Session
+  # container cannot reach the metrics endpoint and enumerate other Sessions' ids
+  # from the service labels (#27, ADR-0004). The host-loopback publish DNATs to
+  # this same IP, so the control-plane scrape is unchanged. Keep this IP in sync
+  # with the `ipv4_address` in compose.yml.
   metrics:
-    address: ":8084"
+    address: "192.168.218.10:8084"
 
 providers:
   # The control plane owns the sessionId -> backend map (ADR-0004); Traefik polls
