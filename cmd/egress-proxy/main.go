@@ -19,6 +19,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -181,16 +182,30 @@ func normalizeHostPort(s, defaultPort string) (string, bool) {
 	return net.JoinHostPort(host, port), true
 }
 
-// tunnel copies bytes both ways until either side closes.
+// tunnel copies bytes both ways and returns only when BOTH directions have
+// finished. When one side closes its write half, we half-close the peer's write
+// half so it sees EOF (rather than closing the whole connection, which would
+// truncate the still-open direction). Waiting for both copies means the caller's
+// deferred Close()s don't fire — and discard in-flight bytes — mid-transfer.
 func tunnel(a, b net.Conn) {
-	done := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 	cp := func(dst, src net.Conn) {
+		defer wg.Done()
 		_, _ = io.Copy(dst, src)
-		done <- struct{}{}
+		closeWrite(dst)
 	}
 	go cp(a, b)
 	go cp(b, a)
-	<-done
+	wg.Wait()
+}
+
+// closeWrite half-closes the write side if the connection supports it (TCP
+// does), signalling EOF to the peer without tearing down the read side.
+func closeWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+	}
 }
 
 // copyHeader copies HTTP headers, skipping hop-by-hop headers.

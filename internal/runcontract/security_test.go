@@ -16,7 +16,7 @@ import (
 // can never overwrite the trusted platform Postgres / seed one-shot in the
 // name-keyed Compose map.
 func TestValidateRejectsReservedServiceNames(t *testing.T) {
-	for _, reserved := range []string{dbServiceName, seedServiceName} {
+	for _, reserved := range []string{dbServiceName, seedServiceName, egressServiceName} {
 		t.Run(reserved, func(t *testing.T) {
 			m := validManifest()
 			// Rename the API service to the reserved name (keep exactly one ui).

@@ -60,9 +60,11 @@ func TestNoHostNetworking(t *testing.T) {
 		t.Errorf("rendered Compose must never carry network_mode (host networking is unrepresentable):\n%s", out)
 	}
 
-	// And every declared network is actually internal — checked structurally
-	// (parsed under the networks key) rather than by substring, so a renamed key
-	// or requoting can't give a false pass.
+	// In the no-egress case there is exactly one network and it must be internal —
+	// checked structurally (parsed under the networks key) rather than by
+	// substring, so a renamed key or requoting can't give a false pass. The
+	// opted-in egress case adds a non-internal net joined ONLY by the proxy; that
+	// is asserted separately by TestToComposeRendersEgressNetworkNonInternal.
 	var doc map[string]any
 	if err := yaml.Unmarshal(out, &doc); err != nil {
 		t.Fatalf("rendered Compose is not valid YAML: %v", err)

@@ -192,8 +192,13 @@ func TestCompileSeedOrdering(t *testing.T) {
 }
 
 func TestAppServicesExcludesPlatformServices(t *testing.T) {
-	m, opts := fixture()
-	plan, _ := Compile(m, opts)
+	// Use the egress fixture so the plan also carries the egress sidecar — every
+	// platform-owned service (db, seed, egress) must be excluded.
+	m, opts := egressFixture()
+	plan, err := Compile(m, opts)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
 
 	names := map[string]bool{}
 	for _, s := range plan.AppServices() {
@@ -202,8 +207,10 @@ func TestAppServicesExcludesPlatformServices(t *testing.T) {
 	if !names["web"] || !names["api"] {
 		t.Errorf("app services missing web/api: %v", names)
 	}
-	if names["db"] || names["seed"] {
-		t.Errorf("app services must exclude db/seed: %v", names)
+	for _, platform := range []string{dbServiceName, seedServiceName, egressServiceName} {
+		if names[platform] {
+			t.Errorf("app services must exclude platform service %q: %v", platform, names)
+		}
 	}
 }
 
