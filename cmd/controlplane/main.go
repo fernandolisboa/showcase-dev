@@ -81,12 +81,6 @@ func main() {
 	//   - splash listener (SplashPort): serves the booting page ONLY. bootingURL
 	//     points here, so a booting Session — whose full request path Traefik
 	//     forwards — gets the splash even for /traefik, never the backend map.
-	// Control-plane persistence (ADR-0009). When DATABASE_URL is set we open the
-	// pool and run migrations before serving — a misconfigured DB or a failed
-	// migration is fatal, so the process never comes up in a half-migrated state.
-	// When it is unset (the dependency-free dev loop) persistence is disabled and
-	// readiness reports ready without a store; the Owner/Project features built on
-	// it in later #19 slices simply aren't wired.
 	registry := proxy.NewRegistry(cfg.DemoDomain)
 	bootingURL := cfg.BootingBackendURL
 	if bootingURL == "" {
