@@ -56,10 +56,11 @@ func (p ExecutionPlan) ToCompose() ([]byte, error) {
 		}
 		if s.Healthcheck != nil {
 			cs.Healthcheck = &composeHealthcheck{
-				Test:     s.Healthcheck.Test,
-				Interval: s.Healthcheck.Interval,
-				Timeout:  s.Healthcheck.Timeout,
-				Retries:  s.Healthcheck.Retries,
+				Test:        s.Healthcheck.Test,
+				Interval:    s.Healthcheck.Interval,
+				Timeout:     s.Healthcheck.Timeout,
+				Retries:     s.Healthcheck.Retries,
+				StartPeriod: s.Healthcheck.StartPeriod,
 			}
 		}
 		file.Services[s.Name] = cs
@@ -109,10 +110,11 @@ type composeDependency struct {
 }
 
 type composeHealthcheck struct {
-	Test     []string `yaml:"test,omitempty"`
-	Interval string   `yaml:"interval,omitempty"`
-	Timeout  string   `yaml:"timeout,omitempty"`
-	Retries  int      `yaml:"retries,omitempty"`
+	Test        []string `yaml:"test,omitempty"`
+	Interval    string   `yaml:"interval,omitempty"`
+	Timeout     string   `yaml:"timeout,omitempty"`
+	Retries     int      `yaml:"retries,omitempty"`
+	StartPeriod string   `yaml:"start_period,omitempty"`
 }
 
 type composeNetwork struct {

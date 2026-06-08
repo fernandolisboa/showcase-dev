@@ -71,6 +71,10 @@ func TestCompileBakesAppHealthcheck(t *testing.T) {
 	if want := []string{"CMD", "/api", "-health"}; !reflect.DeepEqual(api.Healthcheck.Test, want) {
 		t.Errorf("healthcheck test = %v, want %v", api.Healthcheck.Test, want)
 	}
+	// A start period gives a still-starting app a grace window before failures count.
+	if api.Healthcheck.StartPeriod == "" {
+		t.Error("baked healthcheck should set a start period")
+	}
 
 	// A service with no declared probe keeps the image's own HEALTHCHECK (nil).
 	web, ok := find(plan, "web")

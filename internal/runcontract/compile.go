@@ -177,10 +177,11 @@ func appHealthcheck(argv []string) *Healthcheck {
 		return nil
 	}
 	return &Healthcheck{
-		Test:     append([]string{"CMD"}, argv...),
-		Interval: "2s",
-		Timeout:  "3s",
-		Retries:  15,
+		Test:        append([]string{"CMD"}, argv...),
+		Interval:    "2s",
+		Timeout:     "3s",
+		Retries:     15,
+		StartPeriod: "10s",
 	}
 }
 
