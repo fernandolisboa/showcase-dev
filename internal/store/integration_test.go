@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"testing"
@@ -102,11 +103,12 @@ func startStore(t *testing.T, ctx context.Context) *Store {
 	if err != nil {
 		t.Fatalf("docker port: %v\n%s", err, portOut)
 	}
-	// "127.0.0.1:49153" (possibly multiple lines for v4/v6); take the first.
+	// `docker port` can emit several lines (v4 + v6); take the first and parse it
+	// with net.SplitHostPort so an IPv6 form like "[::]:49153" doesn't misparse.
 	hostPort := strings.TrimSpace(strings.SplitN(string(portOut), "\n", 2)[0])
-	_, port, ok := strings.Cut(hostPort, ":")
-	if !ok {
-		t.Fatalf("unexpected docker port output: %q", portOut)
+	_, port, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		t.Fatalf("parse docker port output %q: %v", hostPort, err)
 	}
 	dsn := fmt.Sprintf("postgres://test:test@127.0.0.1:%s/test?sslmode=disable", port)
 

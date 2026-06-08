@@ -72,6 +72,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Refuse to run against a database migrated by a NEWER binary: an applied
+	// version this binary doesn't know about means a rollback, and continuing
+	// would run today's code against a future schema. Fail fast instead.
+	var maxKnown int64
+	if len(migs) > 0 {
+		maxKnown = migs[len(migs)-1].version // migs is version-sorted ascending
+	}
+	for v := range applied {
+		if v > maxKnown {
+			return fmt.Errorf("database has migration %d applied which this binary does not know (max known %d); deploy a newer binary rather than rolling back", v, maxKnown)
+		}
+	}
+
 	for _, m := range migs {
 		if rec, ok := applied[m.version]; ok {
 			if rec != m.checksum {

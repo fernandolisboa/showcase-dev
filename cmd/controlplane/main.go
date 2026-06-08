@@ -44,25 +44,12 @@ func main() {
 			"demo_scheme", cfg.DemoScheme)
 	}
 
-	// Traefik-facing surface, split across two listeners so a Demo can never reach
-	// the control plane (ADR-0004). Both bind cfg.InternalHost (default 127.0.0.1),
-	// off the public app port and off every Session-reachable interface; the Runner
-	// shares this registry (wired in #10).
-	//
-	//   - config listener (InternalPort): serves /traefik. Traefik polls it
-	//     directly over the host gateway; no Session is ever routed to it.
-	//   - splash listener (SplashPort): serves the booting page ONLY. bootingURL
-	//     points here, so a booting Session — whose full request path Traefik
-	//     forwards — gets the splash even for /traefik, never the backend map.
 	// Control-plane persistence (ADR-0009). When DATABASE_URL is set we open the
 	// pool and run migrations before serving — a misconfigured DB or a failed
-	// migration is fatal, so the process never comes up in a half-migrated state.
-	// When it is unset (the dependency-free dev loop) persistence is disabled and
-	// readiness reports ready without a store; the Owner/Project features built on
-	// it in later #19 slices simply aren't wired.
-	// ready is the /readyz DB probe; nil keeps the control plane ready without a
-	// store (dev). The opened Store's repositories are wired by the next #19 slice
-	// (sign-in); for now opening it proves the schema migrates cleanly at boot.
+	// migration is fatal, so the process never comes up half-migrated. When it is
+	// unset (the dependency-free dev loop), persistence is disabled and /readyz
+	// reports ready without a store; the Owner/Project features built on it in
+	// later #19 slices simply aren't wired. `ready` is the /readyz DB probe.
 	var ready func(context.Context) error
 	if cfg.DatabaseURL != "" {
 		st, err := store.Open(context.Background(), cfg.DatabaseURL)
@@ -84,6 +71,22 @@ func main() {
 		logger.Warn("DATABASE_URL not set; control-plane persistence disabled (dev) — Owner/Project features are off")
 	}
 
+	// Traefik-facing surface, split across two listeners so a Demo can never reach
+	// the control plane (ADR-0004). Both bind cfg.InternalHost (default 127.0.0.1),
+	// off the public app port and off every Session-reachable interface; the Runner
+	// shares this registry (wired in #10).
+	//
+	//   - config listener (InternalPort): serves /traefik. Traefik polls it
+	//     directly over the host gateway; no Session is ever routed to it.
+	//   - splash listener (SplashPort): serves the booting page ONLY. bootingURL
+	//     points here, so a booting Session — whose full request path Traefik
+	//     forwards — gets the splash even for /traefik, never the backend map.
+	// Control-plane persistence (ADR-0009). When DATABASE_URL is set we open the
+	// pool and run migrations before serving — a misconfigured DB or a failed
+	// migration is fatal, so the process never comes up in a half-migrated state.
+	// When it is unset (the dependency-free dev loop) persistence is disabled and
+	// readiness reports ready without a store; the Owner/Project features built on
+	// it in later #19 slices simply aren't wired.
 	registry := proxy.NewRegistry(cfg.DemoDomain)
 	bootingURL := cfg.BootingBackendURL
 	if bootingURL == "" {

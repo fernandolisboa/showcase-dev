@@ -8,6 +8,8 @@ CREATE TABLE owners (
 	github_user_id bigint      NOT NULL UNIQUE,
 	github_login   text        NOT NULL,
 	created_at     timestamptz NOT NULL DEFAULT now(),
+	-- No trigger keeps this fresh (minimal-deps): any UPDATE owners SET ... must
+	-- set updated_at = now() explicitly, as the sign-in upsert does.
 	updated_at     timestamptz NOT NULL DEFAULT now()
 );
 
