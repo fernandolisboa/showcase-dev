@@ -100,6 +100,9 @@ type Healthcheck struct {
 	Interval string
 	Timeout  string
 	Retries  int
+	// StartPeriod is a grace window during which a failing probe does not count
+	// against Retries — so a still-starting app isn't marked unhealthy prematurely.
+	StartPeriod string
 }
 
 // AppServices returns the UI and API services (everything the platform builds

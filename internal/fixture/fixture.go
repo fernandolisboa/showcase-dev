@@ -29,11 +29,27 @@ var appFS embed.FS
 // platform stands up with generated, scoped credentials injected as the
 // DATABASE_URL platform env (#16). Each service builds from its embedded context
 // (matching dir name).
+//
+// The API is a real DB-backed demo (#17): a Seed one-shot (reusing the API image)
+// migrates and seeds the fresh DB before readiness, and each service declares a
+// Healthcheck so the platform gates the Session on it actually serving — the API
+// reports healthy only once it can serve its DB-backed items endpoint.
 func Manifest() runcontract.Manifest {
 	return runcontract.Manifest{
 		Services: []runcontract.Service{
-			{Name: "web", Repo: "internal/fixture/web", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleUI},
-			{Name: "api", Repo: "internal/fixture/api", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleAPI, PathPrefix: "/api"},
+			{
+				Name: "web", Repo: "internal/fixture/web", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleUI,
+				// busybox wget probes the static UI; a non-zero exit on a refused
+				// connection keeps the Session "starting" until httpd is up.
+				Healthcheck: []string{"wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"},
+			},
+			{
+				Name: "api", Repo: "internal/fixture/api", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleAPI, PathPrefix: "/api",
+				// The API's own -health subcommand succeeds once it can serve the items
+				// endpoint (server up, migrated schema queryable), so the Session is
+				// gated on the API actually working, not merely started.
+				Healthcheck: []string{"/api", "-health"},
+			},
 		},
 		DB: &runcontract.DB{Engine: "postgres", Version: "17"},
 		Env: []runcontract.EnvVar{
@@ -41,6 +57,10 @@ func Manifest() runcontract.Manifest {
 			// the in-Stack DB; the API connects with it (#16).
 			{Name: "DATABASE_URL", Source: runcontract.EnvPlatform},
 		},
+		// Migrate/seed the fresh per-Session DB before the apps are served (#17).
+		// The seed reuses the API image; its ENTRYPOINT is /api, so the command is
+		// just the flag. App services wait for it to complete (compiled ordering).
+		Seed: &runcontract.Seed{Service: "api", Command: []string{"-seed"}},
 	}
 }
 
