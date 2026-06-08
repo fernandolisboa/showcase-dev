@@ -3,6 +3,8 @@ package runcontract
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // These tests pin the runtime network invariants of ADR-0007 at the pure-compile
@@ -52,12 +54,27 @@ func TestNoHostNetworking(t *testing.T) {
 		t.Fatalf("render compose: %v", err)
 	}
 
-	yaml := string(out)
-	if strings.Contains(yaml, "network_mode") {
-		t.Errorf("rendered Compose must never carry network_mode (host networking is unrepresentable):\n%s", yaml)
+	// No service can carry network_mode: it's not a field on the rendered struct,
+	// so the token must not appear anywhere in the document.
+	if strings.Contains(string(out), "network_mode") {
+		t.Errorf("rendered Compose must never carry network_mode (host networking is unrepresentable):\n%s", out)
 	}
-	// And the sealed network is actually rendered as internal.
-	if !strings.Contains(yaml, "internal: true") {
-		t.Errorf("rendered Compose must mark the Session network internal: true:\n%s", yaml)
+
+	// And every declared network is actually internal — checked structurally
+	// (parsed under the networks key) rather than by substring, so a renamed key
+	// or requoting can't give a false pass.
+	var doc map[string]any
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("rendered Compose is not valid YAML: %v", err)
+	}
+	networks, ok := doc["networks"].(map[string]any)
+	if !ok || len(networks) == 0 {
+		t.Fatalf("rendered Compose has no networks block: %s", out)
+	}
+	for name, v := range networks {
+		net, _ := v.(map[string]any)
+		if internal, _ := net["internal"].(bool); !internal {
+			t.Errorf("network %q must be internal: true (default-deny egress), got %v", name, net["internal"])
+		}
 	}
 }

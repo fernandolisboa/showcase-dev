@@ -9,6 +9,7 @@ package builder
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -173,7 +174,11 @@ func TestBuildHasEgress(t *testing.T) {
 
 	dir := t.TempDir()
 	const dockerfile = "Dockerfile"
-	const content = "FROM alpine:3.21\nRUN apk add --no-cache tzdata\n"
+	// The unique `RUN echo` busts the Docker layer cache so the apk fetch below
+	// actually re-executes every run — a warm cache would skip it and prove nothing
+	// about egress. alpine:3.21 is a recent, supported base; `apk add` reaching the
+	// Alpine CDN is the network signal (it fails if the build has no egress).
+	content := fmt.Sprintf("FROM alpine:3.21\nRUN echo %d\nRUN apk add --no-cache tzdata\n", time.Now().UnixNano())
 	if err := os.WriteFile(filepath.Join(dir, dockerfile), []byte(content), 0o644); err != nil {
 		t.Fatalf("write dockerfile: %v", err)
 	}

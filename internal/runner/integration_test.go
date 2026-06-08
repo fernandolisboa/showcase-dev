@@ -90,9 +90,10 @@ func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 	if _, err := dockerRun(ctx, network, "-s", "--max-time", "8", "https://example.com"); err == nil {
 		t.Error("expected egress to a hostname to be denied on the internal Session network")
 	}
-	// ...and by raw IP, so this proves an L3 route-less deny, not just a DNS lookup
-	// that fails to resolve. A literal address skips name resolution entirely.
-	if _, err := dockerRun(ctx, network, "-s", "--max-time", "8", "https://1.1.1.1"); err == nil {
+	// ...and by raw IP over plain HTTP, so this proves an L3 route-less deny, not a
+	// DNS lookup that fails to resolve (literal address skips name resolution) nor
+	// a TLS handshake that fails for some other reason — it must fail at TCP connect.
+	if _, err := dockerRun(ctx, network, "-s", "--max-time", "8", "http://1.1.1.1"); err == nil {
 		t.Error("expected egress to a raw IP to be denied on the internal Session network")
 	}
 
