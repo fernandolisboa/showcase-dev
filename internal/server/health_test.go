@@ -30,7 +30,7 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestRouterServesHealthz(t *testing.T) {
-	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{}, nil, nil)
+	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{}, nil, nil, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -41,7 +41,7 @@ func TestRouterServesHealthz(t *testing.T) {
 }
 
 func TestRouterServesSPAFallback(t *testing.T) {
-	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{}, nil, nil)
+	h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{}, nil, nil, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/some/client/route", nil))
@@ -62,7 +62,7 @@ func TestReadyz(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{}, nil, tc.check)
+			h := New(slog.New(slog.NewTextHandler(io.Discard, nil)), config.Config{}, nil, tc.check, nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 			if rec.Code != tc.wantCode {

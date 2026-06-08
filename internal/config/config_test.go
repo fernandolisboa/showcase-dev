@@ -70,6 +70,24 @@ func TestEgressProxyImageParsesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestGitHubAuthConfigParsesAndDefaults(t *testing.T) {
+	t.Setenv("GITHUB_APP_CLIENT_ID", "iv1.abc")
+	t.Setenv("GITHUB_APP_CLIENT_SECRET", "shh")
+	t.Setenv("OAUTH_CALLBACK_URL", "https://showcase.dev/auth/github/callback")
+	cfg := Load()
+	if cfg.GitHubClientID != "iv1.abc" || cfg.GitHubClientSecret != "shh" {
+		t.Errorf("GitHub client creds not parsed: %+v", cfg)
+	}
+	if cfg.OAuthCallbackURL != "https://showcase.dev/auth/github/callback" {
+		t.Errorf("OAuthCallbackURL = %q", cfg.OAuthCallbackURL)
+	}
+	// Unset → empty (sign-in disabled, dev-safe).
+	t.Setenv("GITHUB_APP_CLIENT_ID", "")
+	if Load().GitHubClientID != "" {
+		t.Error("GitHubClientID should default empty (sign-in disabled)")
+	}
+}
+
 func TestBuildSandboxTunablesParseAndDefault(t *testing.T) {
 	t.Setenv("BUILD_SANDBOX_IMAGE", "ghcr.io/me/buildkit:pinned")
 	t.Setenv("BUILD_NETWORK", "custom-build-net")

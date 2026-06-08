@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"runtime/debug"
 
+	"github.com/fernandolisboa/showcase-dev/internal/auth"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
 	"github.com/fernandolisboa/showcase-dev/internal/web"
 )
@@ -16,7 +17,9 @@ import (
 // API handler mounted at POST /api/play (#10). ready, when non-nil, is the
 // readiness check (a DB ping) behind GET /readyz; nil means persistence is not
 // configured (dev), so the control plane reports ready without a backing store.
-func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(context.Context) error) http.Handler {
+// authn, when non-nil, mounts the Owner sign-in routes (ADR-0008); nil means
+// persistence/sign-in is disabled (dev without a DB).
+func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(context.Context) error, authn *auth.Authenticator) http.Handler {
 	mux := http.NewServeMux()
 
 	// Liveness: the process is up. Independent of the DB so a transient DB blip
@@ -31,6 +34,16 @@ func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(con
 	// Spin-up API: a Guest starts a Session — anonymous, no account (ADR-0008).
 	if play != nil {
 		mux.Handle("POST /api/play", play)
+	}
+
+	// Owner sign-in (ADR-0008). All on the public listener; /api/play stays
+	// ungated (Guests are anonymous). Login/Callback report 501 if no GitHub App
+	// credentials are configured.
+	if authn != nil {
+		mux.HandleFunc("GET /login", authn.Login)
+		mux.HandleFunc("GET /auth/github/callback", authn.Callback)
+		mux.HandleFunc("POST /logout", authn.Logout)
+		mux.HandleFunc("GET /api/owner/me", authn.Me)
 	}
 
 	// Everything else is the embedded React SPA.

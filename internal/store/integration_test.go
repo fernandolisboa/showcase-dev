@@ -61,6 +61,49 @@ func TestMigrateAndOwnerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoginSessionRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	owner, err := s.UpsertOwnerByGitHubID(ctx, 7, "dev")
+	if err != nil {
+		t.Fatalf("upsert owner: %v", err)
+	}
+
+	// A live session resolves to its owner.
+	if err := s.CreateLoginSession(ctx, "hash-live", owner.ID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	got, err := s.OwnerByLoginSession(ctx, "hash-live")
+	if err != nil || got.ID != owner.ID {
+		t.Fatalf("OwnerByLoginSession = (%+v, %v), want owner %d", got, err, owner.ID)
+	}
+
+	// An expired session is treated as absent and is pruned.
+	if err := s.CreateLoginSession(ctx, "hash-expired", owner.ID, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("create expired session: %v", err)
+	}
+	if _, err := s.OwnerByLoginSession(ctx, "hash-expired"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("expired session should resolve to ErrNotFound, got %v", err)
+	}
+	n, err := s.DeleteExpiredLoginSessions(ctx)
+	if err != nil || n != 1 {
+		t.Errorf("DeleteExpiredLoginSessions = (%d, %v), want (1, nil)", n, err)
+	}
+
+	// Logout removes the live session; it then resolves to ErrNotFound.
+	if err := s.DeleteLoginSession(ctx, "hash-live"); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	if _, err := s.OwnerByLoginSession(ctx, "hash-live"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleted session should resolve to ErrNotFound, got %v", err)
+	}
+}
+
 // A migration file edited after being applied must be rejected (append-only).
 func TestMigrateRejectsModifiedMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
