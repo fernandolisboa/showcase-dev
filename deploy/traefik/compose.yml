@@ -47,7 +47,13 @@ networks:
   # Traefik's own bridge, with a fixed subnet so the metrics entryPoint can bind a
   # known IP (192.168.218.10). Sessions are never attached to this network — they
   # get their own per-Session bridges — so this IP is unreachable from a Session.
-  # The subnet sits outside Docker's default 172.x pool to avoid collisions.
+  #
+  # DEPLOY PRECONDITION: 192.168.218.0/24 must not overlap any existing route on
+  # the host — Docker's default pool (172.x, avoided here), another compose project,
+  # a corporate/WSL VPN route, or the prod VNet (ADR-0009's Azure VM). On overlap,
+  # `compose up` fails closed with a pool-overlap error (it does NOT weaken the
+  # isolation). To relocate, move this subnet AND the coupled metrics address in
+  # traefik.yml together.
   proxy:
     name: showcase-proxy
     ipam:

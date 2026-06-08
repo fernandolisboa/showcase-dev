@@ -33,7 +33,9 @@ jobs:
           cache: true
       # ubuntu-latest ships a running Docker daemon; these tests boot real
       # containers under runc (gVisor/runsc is verified on the VM, not in CI).
-      - run: go test -tags integration -timeout 300s ./internal/runner/... ./internal/session/...
+      # The suite runs serially and now boots a real Traefik (an extra image pull +
+      # readiness wait), so the wall budget is 600s.
+      - run: go test -tags integration -timeout 600s ./internal/runner/... ./internal/session/...
 
   web:
     name: Web — lint, test, build

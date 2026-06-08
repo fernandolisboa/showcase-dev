@@ -24,6 +24,13 @@ import (
 // traefikComposeFile is the shipped Traefik stack, relative to this package dir.
 const traefikComposeFile = "../../deploy/traefik/compose.yml"
 
+// traefikITProject is a dedicated compose project for this test, distinct from the
+// default ("traefik") that `make proxy-up` uses — so the suite never adopts or
+// tears down a developer's running proxy. The compose file pins container_name and
+// host ports, so if `make proxy-up` is already up, `up` here fails fast on the
+// clash instead of silently hijacking (and later destroying) that instance.
+const traefikITProject = "showcase-it-traefik"
+
 // metricsURL is the host-loopback scrape path the control plane uses
 // (config.TraefikMetricsURL default).
 const metricsURL = "http://127.0.0.1:8084/metrics"
@@ -34,7 +41,10 @@ const metricsURL = "http://127.0.0.1:8084/metrics"
 func TestMetricsEndpointSessionUnreachable(t *testing.T) {
 	requireDocker(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Matches the sibling integration tests' budget, and stays under CI's per-job
+	// `-timeout` so this test's own deadline fires first with a clean assertion
+	// message rather than the harness killing the whole job.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	// Real Traefik from deploy/traefik — same artifact prod/dev run, so the static
@@ -92,19 +102,20 @@ func TestMetricsEndpointSessionUnreachable(t *testing.T) {
 	}
 }
 
-// deployTraefikUp boots the shipped Traefik stack. Project name defaults to the
-// compose file's dir ("traefik"), matching `make proxy-up`, so a stray dev
-// instance is reused/cleaned rather than duplicated.
+// deployTraefikUp boots the shipped Traefik stack under a dedicated project name
+// (traefikITProject) so it never adopts or destroys a developer's `make proxy-up`
+// instance — if one is already running, the pinned container_name/host-port clash
+// makes this fail fast instead.
 func deployTraefikUp(ctx context.Context, t *testing.T) {
 	t.Helper()
-	out, err := exec.CommandContext(ctx, "docker", "compose", "-f", traefikComposeFile, "up", "-d").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "docker", "compose", "-p", traefikITProject, "-f", traefikComposeFile, "up", "-d").CombinedOutput()
 	if err != nil {
 		t.Fatalf("traefik up: %v\n%s", err, out)
 	}
 }
 
 func deployTraefikDown() {
-	_ = exec.Command("docker", "compose", "-f", traefikComposeFile, "down", "-v").Run()
+	_ = exec.Command("docker", "compose", "-p", traefikITProject, "-f", traefikComposeFile, "down", "-v").Run()
 }
 
 // waitMetricsReady blocks until the host-loopback metrics endpoint serves 200, so
