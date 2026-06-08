@@ -23,9 +23,9 @@ var usernameRE = regexp.MustCompile(`^[a-z0-9](-?[a-z0-9]){1,38}$`)
 var reservedUsernames = map[string]bool{
 	"about": true, "admin": true, "api": true, "assets": true, "auth": true,
 	"blog": true, "contact": true, "dashboard": true, "demo": true, "docs": true,
-	"explore": true, "favicon.ico": true, "healthz": true, "help": true,
+	"explore": true, "healthz": true, "help": true,
 	"login": true, "logout": true, "me": true, "new": true, "owner": true,
-	"pricing": true, "privacy": true, "readyz": true, "robots.txt": true,
+	"pricing": true, "privacy": true, "readyz": true,
 	"run": true, "search": true, "settings": true, "signin": true, "signup": true,
 	"static": true, "status": true, "support": true, "terms": true, "www": true,
 }
@@ -58,6 +58,13 @@ func (a *Authenticator) ClaimUsername(w http.ResponseWriter, r *http.Request) {
 	owner, ok := OwnerFrom(r.Context())
 	if !ok {
 		http.Error(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	// Set-once for the MVP: a username IS the Portfolio URL, so silently changing
+	// it would break existing links and immediately free the old name for
+	// squatting/impersonation. Changing a username is a deliberate future flow.
+	if owner.Username != "" {
+		http.Error(w, "username already set", http.StatusConflict)
 		return
 	}
 	var body struct {

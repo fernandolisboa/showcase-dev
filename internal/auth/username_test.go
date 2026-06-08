@@ -86,6 +86,20 @@ func TestClaimUsernameRejectsInvalidAndReserved(t *testing.T) {
 	}
 }
 
+func TestClaimUsernameIsSetOnce(t *testing.T) {
+	fs := newFakeStore()
+	a := New(fakeProvider{user: GitHubUser{ID: 3, Login: "dev"}}, fs, false)
+	sid := signIn(t, a)
+
+	if rec := claim(t, a, sid, `{"username":"firstname"}`); rec.Code != http.StatusOK {
+		t.Fatalf("first claim = %d, want 200", rec.Code)
+	}
+	// A second claim by the same Owner is refused — a username is set once (MVP).
+	if rec := claim(t, a, sid, `{"username":"secondname"}`); rec.Code != http.StatusConflict {
+		t.Errorf("re-claim = %d, want 409 (set-once)", rec.Code)
+	}
+}
+
 func TestClaimUsernameConflict(t *testing.T) {
 	fs := newFakeStore()
 	a := New(fakeProvider{user: GitHubUser{ID: 10, Login: "first"}}, fs, false)
