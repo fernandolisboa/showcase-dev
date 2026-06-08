@@ -9,6 +9,7 @@ package runcontract
 import (
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -132,6 +133,24 @@ var reservedEnvNames = map[string]bool{
 // rejects malformed rules ("http://x", "x:80", "*.evil.com") at the contract.
 var egressHostRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
 
+// safeContextPath reports whether p is a clean relative path that stays inside its
+// root: no absolute path, no leading slash, no backslash, no ".." escape. An Owner
+// declares Service.Dockerfile and the builder passes it to BuildKit as a path within
+// the cloned repo (the read-only build context), so "/etc/x" or "../../x" must be
+// rejected at the contract before it can read outside the context (ADR-0003/0010).
+func safeContextPath(p string) bool {
+	if p == "" || strings.ContainsRune(p, '\\') || path.IsAbs(p) {
+		return false
+	}
+	switch c := path.Clean(p); {
+	case c == ".", c == "..":
+		return false
+	case strings.HasPrefix(c, "../"):
+		return false
+	}
+	return true
+}
+
 // Validate reports every problem with the Manifest at once (ADR-0003: the
 // platform builds strictly from an explicit, well-formed contract).
 func (m Manifest) Validate() error {
@@ -161,6 +180,8 @@ func (m Manifest) Validate() error {
 		}
 		if s.Dockerfile == "" {
 			errs = append(errs, fmt.Errorf("%s: dockerfile is required", where))
+		} else if !safeContextPath(s.Dockerfile) {
+			errs = append(errs, fmt.Errorf("%s: dockerfile %q must be a relative path inside the repo (no leading /, no .. escape)", where, s.Dockerfile))
 		}
 		if s.Port < 1 || s.Port > 65535 {
 			errs = append(errs, fmt.Errorf("%s: port %d out of range 1-65535", where, s.Port))

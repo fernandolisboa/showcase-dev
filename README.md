@@ -37,6 +37,9 @@ into their own packages + `CONTEXT.md` as the architecture firms up.
 
 - **Go 1.26+**, **Node 24+** (npm 11+)
 - **Docker** (optional locally — only for the dev Postgres in `compose.dev.yml`)
+- **git** — the control plane shells out to `git` to clone an Owner's repo at publish
+  (#19). Required only when building Owner Projects (the GitHub App must be configured);
+  the demo fixture builds without it.
 
 ## Quickstart
 

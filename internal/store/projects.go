@@ -39,6 +39,10 @@ type Project struct {
 	Name      string
 	Manifest  []byte
 	Published bool
+	// CommitSHA is the source commit the Project was last published at (empty until
+	// the first publish). It pins the played version — the build path uses it as the
+	// cache key so play is a cache hit on the published image (#19).
+	CommitSHA string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -51,10 +55,10 @@ func (s *Store) CreateProject(ctx context.Context, ownerID int64, name string, m
 	const q = `
 INSERT INTO projects (owner_id, name, manifest)
 VALUES ($1, $2, $3)
-RETURNING id, owner_id, name, manifest, published, created_at, updated_at`
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, ownerID, name, manifest).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 		return Project{}, ErrProjectNameTaken
@@ -73,11 +77,11 @@ func (s *Store) GetOwnerProject(ctx context.Context, ownerID int64, id string) (
 		return Project{}, ErrProjectNotFound
 	}
 	const q = `
-SELECT id, owner_id, name, manifest, published, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at
 FROM projects WHERE id = $1 AND owner_id = $2`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id, ownerID).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
 	}
@@ -97,11 +101,11 @@ func (s *Store) GetPublishedProject(ctx context.Context, id string) (Project, er
 		return Project{}, ErrProjectNotFound
 	}
 	const q = `
-SELECT id, owner_id, name, manifest, published, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at
 FROM projects WHERE id = $1 AND published`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
 	}
@@ -114,7 +118,7 @@ FROM projects WHERE id = $1 AND published`
 // ListProjectsByOwner returns an Owner's Projects, newest first.
 func (s *Store) ListProjectsByOwner(ctx context.Context, ownerID int64) ([]Project, error) {
 	const q = `
-SELECT id, owner_id, name, manifest, published, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at
 FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 	rows, err := s.pool.Query(ctx, q, ownerID)
 	if err != nil {
@@ -124,7 +128,7 @@ FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 	var ps []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		ps = append(ps, p)
@@ -133,4 +137,26 @@ FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
 	return ps, nil
+}
+
+// PublishProject marks one of an Owner's Projects published and records the commit it
+// was built at, atomically (so a Guest never sees published-without-a-pinned-commit).
+// Owner-scoped: a cross-owner or missing id affects no row and returns
+// ErrProjectNotFound. The caller publishes only after a successful build, so a
+// published Project is always buildable at the recorded commit (#19).
+func (s *Store) PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error {
+	if !uuidRE.MatchString(id) {
+		return ErrProjectNotFound
+	}
+	const q = `
+UPDATE projects SET published = true, commit_sha = $3, updated_at = now()
+WHERE id = $1 AND owner_id = $2`
+	tag, err := s.pool.Exec(ctx, q, id, ownerID, commitSHA)
+	if err != nil {
+		return fmt.Errorf("publish project: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
 }

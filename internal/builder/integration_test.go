@@ -203,7 +203,7 @@ func buildFixture(ctx context.Context, t *testing.T) runner.Project {
 	b := New(20, logger)
 	source := NewBuildingSource(
 		runner.StaticSource{P: runner.Project{Manifest: fixture.Manifest(), Images: map[string]string{}}}, b,
-		func(projectID string, svc runcontract.Service) (BuildSpec, error) {
+		func(_ context.Context, projectID string, svc runcontract.Service, _ string) (BuildSpec, error) {
 			version, err := fixture.Version(svc.Name)
 			if err != nil {
 				return BuildSpec{}, err

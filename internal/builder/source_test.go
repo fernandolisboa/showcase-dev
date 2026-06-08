@@ -35,7 +35,7 @@ func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Disca
 func TestBuildingSourceSwapsInBuiltTags(t *testing.T) {
 	base := runner.StaticSource{P: runner.FixtureProject()} // service "web", prebuilt whoami
 	fb := &fakeBuilder{tag: "showcase/fixture-web:abc123"}
-	spec := func(projectID string, svc runcontract.Service) (BuildSpec, error) {
+	spec := func(_ context.Context, projectID string, svc runcontract.Service, _ string) (BuildSpec, error) {
 		return BuildSpec{ImageName: "showcase/" + projectID + "-" + svc.Name, Version: "v1"}, nil
 	}
 	src := NewBuildingSource(base, fb, spec, discardLogger())
@@ -52,6 +52,29 @@ func TestBuildingSourceSwapsInBuiltTags(t *testing.T) {
 	}
 }
 
+func TestBuildingSourcePassesPinnedCommitToSpec(t *testing.T) {
+	// The pinned Commit (the published commit on the play path, or the once-resolved
+	// HEAD at publish) is passed straight through to every service's SpecFunc — so the
+	// build is the published image (a cache hit) — and preserved on the way out.
+	fb := &fakeBuilder{tag: "img"}
+	base := runner.StaticSource{P: runner.Project{Manifest: runner.FixtureProject().Manifest, Commit: "pinnedsha"}}
+	var sawCommit string
+	spec := func(_ context.Context, projectID string, svc runcontract.Service, commit string) (BuildSpec, error) {
+		sawCommit = commit
+		return BuildSpec{ImageName: "showcase/" + projectID + "-" + svc.Name, Version: commit}, nil
+	}
+	p, err := NewBuildingSource(base, fb, spec, discardLogger()).Project(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if sawCommit != "pinnedsha" {
+		t.Errorf("the pinned commit must reach the SpecFunc, got %q", sawCommit)
+	}
+	if p.Commit != "pinnedsha" {
+		t.Errorf("the pinned commit must be preserved, got %q", p.Commit)
+	}
+}
+
 func TestBuildingSourceBuildsEveryServiceSoSeedIsCovered(t *testing.T) {
 	// A Seed reuses a declared service's image (manifest validation guarantees
 	// seed.service is declared). Building every declared service must therefore
@@ -64,7 +87,7 @@ func TestBuildingSourceBuildsEveryServiceSoSeedIsCovered(t *testing.T) {
 		Images: map[string]string{},
 	}}
 	fb := &fakeBuilder{}
-	spec := func(_ string, svc runcontract.Service) (BuildSpec, error) {
+	spec := func(_ context.Context, _ string, svc runcontract.Service, _ string) (BuildSpec, error) {
 		return BuildSpec{ImageName: "showcase/" + svc.Name, Version: "v1"}, nil
 	}
 	src := NewBuildingSource(base, fb, spec, discardLogger())
@@ -85,7 +108,7 @@ func TestBuildingSourceBuildsEveryServiceSoSeedIsCovered(t *testing.T) {
 func TestBuildingSourcePropagatesBuildFailure(t *testing.T) {
 	base := runner.StaticSource{P: runner.FixtureProject()}
 	fb := &fakeBuilder{err: errors.New("docker build: boom")}
-	spec := func(projectID string, svc runcontract.Service) (BuildSpec, error) {
+	spec := func(_ context.Context, _ string, svc runcontract.Service, _ string) (BuildSpec, error) {
 		return BuildSpec{ImageName: "showcase/" + svc.Name}, nil
 	}
 	src := NewBuildingSource(base, fb, spec, discardLogger())

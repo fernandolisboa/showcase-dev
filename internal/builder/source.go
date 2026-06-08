@@ -15,10 +15,13 @@ type imageBuilder interface {
 	Build(ctx context.Context, spec BuildSpec) (string, error)
 }
 
-// SpecFunc resolves a Project's service to the spec for building its image. For
-// the fixture it points at the embedded build context; for real Owner Projects
-// (#19) it will clone the repo at the configured commit.
-type SpecFunc func(projectID string, svc runcontract.Service) (BuildSpec, error)
+// SpecFunc resolves a Project's service to the spec for building its image. For the
+// fixture it points at the embedded build context; for real Owner Projects (#19) it
+// clones the repo. commit pins the source revision: non-empty (the play path) builds
+// EXACTLY that commit; empty (the publish path) resolves the default-branch HEAD and
+// the BuildingSource reports the resolved commit back. ctx bounds any network work
+// (resolving/cloning), so a slow remote can be cancelled.
+type SpecFunc func(ctx context.Context, projectID string, svc runcontract.Service, commit string) (BuildSpec, error)
 
 // BuildingSource is a runner.ProjectSource that builds each service's image from
 // source (caching via the Builder) and returns the Project with the built image
@@ -49,9 +52,13 @@ func (s *BuildingSource) Project(ctx context.Context, projectID string) (runner.
 	// Build every declared service. A Seed reuses a declared service's image
 	// (manifest validation requires seed.service to be a declared service), so
 	// building all services also supplies the seed's image — no special case.
+	// p.Commit pins the revision and is passed unchanged to every service: the play
+	// path sets it to the published commit (so each build is a cache hit on the
+	// published image), and the publisher pins the repo's resolved HEAD before calling
+	// so the whole Project builds at ONE commit (no per-service HEAD drift).
 	images := make(map[string]string, len(p.Manifest.Services))
 	for _, svc := range p.Manifest.Services {
-		spec, err := s.spec(projectID, svc)
+		spec, err := s.spec(ctx, projectID, svc, p.Commit)
 		if err != nil {
 			return runner.Project{}, fmt.Errorf("resolve build spec for %s/%s: %w", projectID, svc.Name, err)
 		}

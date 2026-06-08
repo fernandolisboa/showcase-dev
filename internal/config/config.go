@@ -61,6 +61,14 @@ type Config struct {
 	// It MUST match a callback URL configured on the GitHub App exactly. Empty
 	// derives a dev default from the listen address.
 	OAuthCallbackURL string
+	// GitHubAppID / GitHubAppPrivateKey are the GitHub App's own credentials for
+	// minting installation access tokens to clone an Owner's repo at publish (#19,
+	// ADR-0008). The App ID is the numeric id (the JWT issuer); the private key is a
+	// PEM (PKCS#1 RSA). Both empty => building Owner repos is disabled (publish
+	// returns 501); the demo still runs. The key is a secret (Key Vault in prod) and
+	// is never logged.
+	GitHubAppID         string
+	GitHubAppPrivateKey string
 	// DemoScheme is the URL scheme for Session links ("http" dev, "https" prod).
 	DemoScheme string
 	// IdleTimeout tears down a Session after this long with no Guest activity —
@@ -118,36 +126,38 @@ type Config struct {
 // Load reads configuration from the environment, applying defaults.
 func Load() Config {
 	return Config{
-		Host:               getenv("HOST", ""),
-		Port:               getenvInt("PORT", 8080),
-		Env:                getenv("ENV", "dev"),
-		DatabaseURL:        getenv("DATABASE_URL", ""),
-		DemoDomain:         getenv("DEMO_DOMAIN", "localhost"),
-		BootingBackendURL:  getenv("PROXY_BOOTING_URL", ""),
-		InternalHost:       getenv("INTERNAL_HOST", "127.0.0.1"),
-		InternalPort:       getenvInt("INTERNAL_PORT", 8081),
-		SplashPort:         getenvInt("SPLASH_PORT", 8082),
-		Runtime:            getenv("RUNTIME", "runsc"),
-		TraefikContainer:   getenv("TRAEFIK_CONTAINER", "showcase-traefik"),
-		EgressProxyImage:   getenv("EGRESS_PROXY_IMAGE", "showcase-dev/egress-proxy:latest"),
-		GitHubClientID:     getenv("GITHUB_APP_CLIENT_ID", ""),
-		GitHubClientSecret: getenv("GITHUB_APP_CLIENT_SECRET", ""),
-		OAuthCallbackURL:   getenv("OAUTH_CALLBACK_URL", ""),
-		DemoScheme:         getenv("DEMO_SCHEME", "http"),
-		IdleTimeout:        getenvDuration("IDLE_TIMEOUT", 15*time.Minute),
-		MaxRuntime:         getenvDuration("MAX_RUNTIME", 45*time.Minute),
-		ReaperInterval:     getenvDuration("REAPER_INTERVAL", 30*time.Second),
-		TraefikMetricsURL:  getenv("TRAEFIK_METRICS_URL", "http://127.0.0.1:8084/metrics"),
-		CrashGrace:         getenvDuration("CRASH_GRACE", 30*time.Second),
-		FailureLinger:      getenvDuration("FAILURE_LINGER", 2*time.Minute),
-		MaxCachedImages:    getenvInt("MAX_CACHED_IMAGES", 20),
-		MaxSessions:        getenvInt("MAX_SESSIONS", 10),
-		BuildSandboxImage:  getenv("BUILD_SANDBOX_IMAGE", "moby/buildkit:rootless"),
-		BuildNetwork:       getenv("BUILD_NETWORK", "showcase-build"),
-		BuildMemoryMB:      getenvInt("BUILD_MEMORY_MB", 2048),
-		BuildCPUs:          getenvFloat("BUILD_CPUS", 2.0),
-		BuildPidsLimit:     getenvInt("BUILD_PIDS_LIMIT", 2048),
-		BuildTimeout:       getenvDuration("BUILD_TIMEOUT", 5*time.Minute),
+		Host:                getenv("HOST", ""),
+		Port:                getenvInt("PORT", 8080),
+		Env:                 getenv("ENV", "dev"),
+		DatabaseURL:         getenv("DATABASE_URL", ""),
+		DemoDomain:          getenv("DEMO_DOMAIN", "localhost"),
+		BootingBackendURL:   getenv("PROXY_BOOTING_URL", ""),
+		InternalHost:        getenv("INTERNAL_HOST", "127.0.0.1"),
+		InternalPort:        getenvInt("INTERNAL_PORT", 8081),
+		SplashPort:          getenvInt("SPLASH_PORT", 8082),
+		Runtime:             getenv("RUNTIME", "runsc"),
+		TraefikContainer:    getenv("TRAEFIK_CONTAINER", "showcase-traefik"),
+		EgressProxyImage:    getenv("EGRESS_PROXY_IMAGE", "showcase-dev/egress-proxy:latest"),
+		GitHubClientID:      getenv("GITHUB_APP_CLIENT_ID", ""),
+		GitHubClientSecret:  getenv("GITHUB_APP_CLIENT_SECRET", ""),
+		OAuthCallbackURL:    getenv("OAUTH_CALLBACK_URL", ""),
+		GitHubAppID:         getenv("GITHUB_APP_ID", ""),
+		GitHubAppPrivateKey: getenv("GITHUB_APP_PRIVATE_KEY", ""),
+		DemoScheme:          getenv("DEMO_SCHEME", "http"),
+		IdleTimeout:         getenvDuration("IDLE_TIMEOUT", 15*time.Minute),
+		MaxRuntime:          getenvDuration("MAX_RUNTIME", 45*time.Minute),
+		ReaperInterval:      getenvDuration("REAPER_INTERVAL", 30*time.Second),
+		TraefikMetricsURL:   getenv("TRAEFIK_METRICS_URL", "http://127.0.0.1:8084/metrics"),
+		CrashGrace:          getenvDuration("CRASH_GRACE", 30*time.Second),
+		FailureLinger:       getenvDuration("FAILURE_LINGER", 2*time.Minute),
+		MaxCachedImages:     getenvInt("MAX_CACHED_IMAGES", 20),
+		MaxSessions:         getenvInt("MAX_SESSIONS", 10),
+		BuildSandboxImage:   getenv("BUILD_SANDBOX_IMAGE", "moby/buildkit:rootless"),
+		BuildNetwork:        getenv("BUILD_NETWORK", "showcase-build"),
+		BuildMemoryMB:       getenvInt("BUILD_MEMORY_MB", 2048),
+		BuildCPUs:           getenvFloat("BUILD_CPUS", 2.0),
+		BuildPidsLimit:      getenvInt("BUILD_PIDS_LIMIT", 2048),
+		BuildTimeout:        getenvDuration("BUILD_TIMEOUT", 5*time.Minute),
 	}
 }
 
