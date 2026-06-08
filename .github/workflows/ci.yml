@@ -35,7 +35,7 @@ jobs:
       # under runc and a real Traefik (#27 — an extra image pull + readiness wait);
       # gVisor/runsc is verified on the VM, not in CI. The serial boots are why the
       # wall budget is 600s.
-      - run: go test -tags integration -timeout 600s ./internal/runner/... ./internal/session/...
+      - run: go test -tags integration -timeout 600s ./internal/runner/... ./internal/session/... ./internal/store/...
 
   integration-builder:
     name: Builder sandbox integration (Docker)

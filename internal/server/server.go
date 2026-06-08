@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -12,12 +13,20 @@ import (
 )
 
 // New builds the control-plane HTTP handler. play, when non-nil, is the spin-up
-// API handler mounted at POST /api/play (#10).
-func New(logger *slog.Logger, _ config.Config, play http.Handler) http.Handler {
+// API handler mounted at POST /api/play (#10). ready, when non-nil, is the
+// readiness check (a DB ping) behind GET /readyz; nil means persistence is not
+// configured (dev), so the control plane reports ready without a backing store.
+func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
 
-	// Liveness. Readiness (incl. the DB check) lands with the write-model slice.
+	// Liveness: the process is up. Independent of the DB so a transient DB blip
+	// doesn't get the process killed by a liveness probe.
 	mux.HandleFunc("GET /healthz", health)
+
+	// Readiness: the process can serve traffic that needs its dependencies — here,
+	// the database. Distinct from liveness so an orchestrator drains (not kills) a
+	// control plane whose DB is briefly unreachable.
+	mux.HandleFunc("GET /readyz", readiness(ready))
 
 	// Spin-up API: a Guest starts a Session — anonymous, no account (ADR-0008).
 	if play != nil {

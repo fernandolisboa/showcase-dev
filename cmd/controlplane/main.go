@@ -25,6 +25,7 @@ import (
 	"github.com/fernandolisboa/showcase-dev/internal/runner"
 	"github.com/fernandolisboa/showcase-dev/internal/server"
 	"github.com/fernandolisboa/showcase-dev/internal/session"
+	"github.com/fernandolisboa/showcase-dev/internal/store"
 )
 
 // fixtureProjectID is the single hand-configured Project the MVP plays (the
@@ -53,6 +54,36 @@ func main() {
 	//   - splash listener (SplashPort): serves the booting page ONLY. bootingURL
 	//     points here, so a booting Session — whose full request path Traefik
 	//     forwards — gets the splash even for /traefik, never the backend map.
+	// Control-plane persistence (ADR-0009). When DATABASE_URL is set we open the
+	// pool and run migrations before serving — a misconfigured DB or a failed
+	// migration is fatal, so the process never comes up in a half-migrated state.
+	// When it is unset (the dependency-free dev loop) persistence is disabled and
+	// readiness reports ready without a store; the Owner/Project features built on
+	// it in later #19 slices simply aren't wired.
+	// ready is the /readyz DB probe; nil keeps the control plane ready without a
+	// store (dev). The opened Store's repositories are wired by the next #19 slice
+	// (sign-in); for now opening it proves the schema migrates cleanly at boot.
+	var ready func(context.Context) error
+	if cfg.DatabaseURL != "" {
+		st, err := store.Open(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			logger.Error("open database", "err", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+		migrateCtx, migrateCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := st.Migrate(migrateCtx); err != nil {
+			migrateCancel()
+			logger.Error("run migrations", "err", err)
+			os.Exit(1)
+		}
+		migrateCancel()
+		ready = st.Ping
+		logger.Info("control-plane persistence ready (migrations applied)")
+	} else {
+		logger.Warn("DATABASE_URL not set; control-plane persistence disabled (dev) — Owner/Project features are off")
+	}
+
 	registry := proxy.NewRegistry(cfg.DemoDomain)
 	bootingURL := cfg.BootingBackendURL
 	if bootingURL == "" {
@@ -170,7 +201,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID)),
+		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID), ready),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
