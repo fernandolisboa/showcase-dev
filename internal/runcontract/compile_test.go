@@ -47,6 +47,41 @@ func TestCompileDBEngineUsedAsIs(t *testing.T) {
 	}
 }
 
+func TestCompileBakesAppHealthcheck(t *testing.T) {
+	m, opts := fixture()
+	for i := range m.Services {
+		if m.Services[i].Name == "api" {
+			m.Services[i].Healthcheck = []string{"/api", "-health"}
+		}
+	}
+
+	plan, err := Compile(m, opts)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	api, ok := find(plan, "api")
+	if !ok {
+		t.Fatal("expected the api service in the plan")
+	}
+	if api.Healthcheck == nil {
+		t.Fatal("declared healthcheck must be baked into the plan")
+	}
+	// The platform prefixes Docker's CMD sentinel; the Owner supplies only argv.
+	if want := []string{"CMD", "/api", "-health"}; !reflect.DeepEqual(api.Healthcheck.Test, want) {
+		t.Errorf("healthcheck test = %v, want %v", api.Healthcheck.Test, want)
+	}
+
+	// A service with no declared probe keeps the image's own HEALTHCHECK (nil).
+	web, ok := find(plan, "web")
+	if !ok {
+		t.Fatal("expected the web service in the plan")
+	}
+	if web.Healthcheck != nil {
+		t.Errorf("undeclared healthcheck must stay nil, got %+v", web.Healthcheck)
+	}
+}
+
 func TestCompilePresentInvariants(t *testing.T) {
 	m, opts := fixture()
 	plan, err := Compile(m, opts)

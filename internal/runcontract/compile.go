@@ -159,11 +159,29 @@ func Compile(m Manifest, opts Options) (ExecutionPlan, error) {
 			CapDrop:        []string{"ALL"},
 			SecurityOpt:    []string{"no-new-privileges:true"},
 			Restart:        "on-failure",
+			Healthcheck:    appHealthcheck(s.Healthcheck),
 			DependsOn:      cloneDeps(appDeps),
 		})
 	}
 
 	return plan, nil
+}
+
+// appHealthcheck bakes an Owner-declared readiness probe (exec-form argv) into a
+// Compose healthcheck so `up --wait` gates the Session on the app actually
+// serving — not merely started (ADR-0004/0006, #17). The platform prefixes the
+// Docker "CMD" sentinel so the Owner supplies only the argv, never a shell
+// string. No probe declared leaves the image's own HEALTHCHECK untouched (nil).
+func appHealthcheck(argv []string) *Healthcheck {
+	if len(argv) == 0 {
+		return nil
+	}
+	return &Healthcheck{
+		Test:     append([]string{"CMD"}, argv...),
+		Interval: "2s",
+		Timeout:  "3s",
+		Retries:  15,
+	}
 }
 
 // dbService builds the platform-provided database. It is a trusted platform

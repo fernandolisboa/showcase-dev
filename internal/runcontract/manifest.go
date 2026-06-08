@@ -60,6 +60,12 @@ type Service struct {
 	// PathPrefix is where the proxy mounts an API (e.g. "/api"). UI services
 	// ignore it (they are served at "/").
 	PathPrefix string
+	// Healthcheck is an optional readiness probe: the exec-form argv the platform
+	// bakes into the container's healthcheck (prefixed with Docker's CMD sentinel)
+	// so readiness — and thus serving the Demo — is gated on the service actually
+	// working, not merely started (ADR-0004/0006, #17). Empty leaves the image's
+	// own HEALTHCHECK (or none).
+	Healthcheck []string
 }
 
 // DB declares an in-Stack database the platform provisions fresh per Session.
@@ -148,6 +154,12 @@ func (m Manifest) Validate() error {
 			}
 		default:
 			errs = append(errs, fmt.Errorf("%s: role must be %q or %q, got %q", where, RoleUI, RoleAPI, s.Role))
+		}
+
+		for j, arg := range s.Healthcheck {
+			if arg == "" {
+				errs = append(errs, fmt.Errorf("%s: healthcheck[%d] is empty", where, j))
+			}
 		}
 	}
 

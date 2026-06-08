@@ -1,0 +1,155 @@
+// Command apifixture is the API service of the build-from-source fixture and a
+// real DB-backed demo (#17). The platform runs it once with -seed to migrate and
+// seed the fresh per-Session Postgres before readiness, then runs it as an HTTP
+// server that reads the seeded rows back. -health is the container readiness
+// probe the Session is gated on.
+//
+// Committed as a *.txt file (with go.mod.txt/go.sum.txt): internal/fixture embeds
+// this directory with //go:embed, which refuses to descend into a nested Go
+// module, so the real names exist only inside the image build (see the Dockerfile).
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	_ "github.com/lib/pq"
+)
+
+const addr = ":8080"
+
+// seedRows is the representative data every Session boots with (#17).
+var seedRows = []string{"alpha", "beta", "gamma"}
+
+func main() {
+	log.SetFlags(0)
+	doSeed := flag.Bool("seed", false, "migrate and seed the database, then exit")
+	doHealth := flag.Bool("health", false, "probe local readiness, then exit")
+	flag.Parse()
+
+	switch {
+	case *doHealth:
+		os.Exit(health())
+	case *doSeed:
+		if err := seed(); err != nil {
+			log.Fatalf("seed: %v", err)
+		}
+	default:
+		if err := serve(); err != nil {
+			log.Fatalf("serve: %v", err)
+		}
+	}
+}
+
+// open dials the per-Session DB from the platform-injected DATABASE_URL, retrying
+// so a just-healthy Postgres still finishing startup doesn't fail the one-shot.
+func open() (*sql.DB, error) {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return nil, fmt.Errorf("DATABASE_URL is not set")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	var last error
+	for i := 0; i < 30; i++ {
+		if last = db.Ping(); last == nil {
+			return db, nil
+		}
+		time.Sleep(time.Second)
+	}
+	db.Close()
+	return nil, fmt.Errorf("ping db: %w", last)
+}
+
+// seed migrates the schema and inserts the representative rows. It is idempotent
+// so a re-run against an already-seeded DB is harmless.
+func seed() error {
+	db, err := open()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS items (id SERIAL PRIMARY KEY, name TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM items`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		for _, name := range seedRows {
+			if _, err := db.Exec(`INSERT INTO items (name) VALUES ($1)`, name); err != nil {
+				return err
+			}
+		}
+	}
+	log.Printf("seeded %d items", len(seedRows))
+	return nil
+}
+
+func listItems(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT name FROM items ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+func serve() error {
+	db, err := open()
+	if err != nil {
+		return err
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/items", func(w http.ResponseWriter, r *http.Request) {
+		names, err := listItems(db)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(names)
+	})
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		names, err := listItems(db)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, "Showcase API is running. %d seeded items: %v\n", len(names), names)
+	})
+	log.Printf("listening on %s", addr)
+	return http.ListenAndServe(addr, mux)
+}
+
+// health is the readiness probe: it succeeds only once the server can serve the
+// seeded rows, so the platform marks the Session ready only when it truly works.
+func health() int {
+	resp, err := http.Get("http://127.0.0.1:8080/api/items")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	return 0
+}
