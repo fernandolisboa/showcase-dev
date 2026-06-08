@@ -21,6 +21,7 @@ import (
 	"github.com/fernandolisboa/showcase-dev/internal/builder"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
 	"github.com/fernandolisboa/showcase-dev/internal/fixture"
+	"github.com/fernandolisboa/showcase-dev/internal/project"
 	"github.com/fernandolisboa/showcase-dev/internal/proxy"
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 	"github.com/fernandolisboa/showcase-dev/internal/runner"
@@ -79,7 +80,12 @@ func main() {
 	// still build the Authenticator (sessions validate) but Login/Callback report
 	// 501 — the dev loop runs without a real App.
 	var authn *auth.Authenticator
+	var projects *project.Handlers
 	if dbStore != nil {
+		// Owner project config (#19) is backed by the same store and gated by the
+		// same sign-in; it is mounted only alongside the Authenticator.
+		projects = project.NewHandlers(dbStore)
+
 		var provider auth.IdentityProvider
 		if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {
 			callback := cfg.OAuthCallbackURL
@@ -228,7 +234,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID), ready, authn),
+		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID), ready, authn, projects),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

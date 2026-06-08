@@ -10,6 +10,7 @@ import (
 
 	"github.com/fernandolisboa/showcase-dev/internal/auth"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
+	"github.com/fernandolisboa/showcase-dev/internal/project"
 	"github.com/fernandolisboa/showcase-dev/internal/web"
 )
 
@@ -18,8 +19,10 @@ import (
 // readiness check (a DB ping) behind GET /readyz; nil means persistence is not
 // configured (dev), so the control plane reports ready without a backing store.
 // authn, when non-nil, mounts the Owner sign-in routes (ADR-0008); nil means
-// persistence/sign-in is disabled (dev without a DB).
-func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(context.Context) error, authn *auth.Authenticator) http.Handler {
+// persistence/sign-in is disabled (dev without a DB). projects, when non-nil, mounts
+// the Owner project-config routes behind RequireOwner; it requires authn (the gate)
+// and so is only honored alongside it.
+func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(context.Context) error, authn *auth.Authenticator, projects *project.Handlers) http.Handler {
 	mux := http.NewServeMux()
 
 	// Liveness: the process is up. Independent of the DB so a transient DB blip
@@ -47,6 +50,15 @@ func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(con
 		// Claiming a username mutates Owner state, so it's gated behind a session
 		// (RequireOwner injects the Owner ClaimUsername reads from context).
 		mux.Handle("POST /api/owner/username", authn.RequireOwner(http.HandlerFunc(authn.ClaimUsername)))
+
+		// Owner project config (#19): create/list/read a Project. All mutate or
+		// expose Owner-private state, so all are gated; the {id} read is scoped to
+		// the Owner in the store so one Owner can never read another's Project.
+		if projects != nil {
+			mux.Handle("POST /api/owner/projects", authn.RequireOwner(http.HandlerFunc(projects.Create)))
+			mux.Handle("GET /api/owner/projects", authn.RequireOwner(http.HandlerFunc(projects.List)))
+			mux.Handle("GET /api/owner/projects/{id}", authn.RequireOwner(http.HandlerFunc(projects.Get)))
+		}
 	}
 
 	// Everything else is the embedded React SPA.

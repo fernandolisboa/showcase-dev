@@ -11,6 +11,7 @@ import (
 
 	"github.com/fernandolisboa/showcase-dev/internal/auth"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
+	"github.com/fernandolisboa/showcase-dev/internal/project"
 	"github.com/fernandolisboa/showcase-dev/internal/store"
 )
 
@@ -35,7 +36,7 @@ func (noopStore) SetUsername(context.Context, int64, string) error { return nil 
 func TestAuthRoutesMountedWhenAuthenticatorPresent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	authn := auth.New(nil, noopStore{}, false) // nil provider = sign-in unconfigured
-	h := New(logger, config.Config{}, nil, nil, authn)
+	h := New(logger, config.Config{}, nil, nil, authn, nil)
 
 	me := httptest.NewRecorder()
 	h.ServeHTTP(me, httptest.NewRequest(http.MethodGet, "/api/owner/me", nil))
@@ -54,11 +55,63 @@ func TestAuthRoutesMountedWhenAuthenticatorPresent(t *testing.T) {
 // (200) rather than erroring — sign-in is simply absent.
 func TestAuthRoutesAbsentWithoutAuthenticator(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := New(logger, config.Config{}, nil, nil, nil)
+	h := New(logger, config.Config{}, nil, nil, nil, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/owner/me", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("GET /api/owner/me = %d, want SPA fallback 200 when sign-in disabled", rec.Code)
+	}
+}
+
+// noopProjectStore satisfies project.Store; the route-mounting test never reaches a
+// method (RequireOwner 401s the anonymous request first), so the bodies are trivial.
+type noopProjectStore struct{}
+
+func (noopProjectStore) CreateProject(context.Context, int64, string, []byte) (store.Project, error) {
+	return store.Project{}, nil
+}
+func (noopProjectStore) GetOwnerProject(context.Context, int64, string) (store.Project, error) {
+	return store.Project{}, store.ErrProjectNotFound
+}
+func (noopProjectStore) ListProjectsByOwner(context.Context, int64) ([]store.Project, error) {
+	return nil, nil
+}
+
+// With both an Authenticator and project Handlers wired, the Owner project routes
+// are mounted and gated: an anonymous request gets 401 (RequireOwner), not the SPA
+// 200 fallback — proving the route exists behind the gate.
+func TestProjectRoutesMountedWhenPresent(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	authn := auth.New(nil, noopStore{}, false)
+	projects := project.NewHandlers(noopProjectStore{})
+	h := New(logger, config.Config{}, nil, nil, authn, projects)
+
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodPost, "/api/owner/projects"},
+		{http.MethodGet, "/api/owner/projects"},
+		{http.MethodGet, "/api/owner/projects/some-id"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s = %d, want 401 (route mounted, anonymous)", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+// Without project Handlers, the project routes fall through to the SPA (200) — the
+// feature is simply absent (dev without a DB).
+func TestProjectRoutesAbsentWithoutHandlers(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	authn := auth.New(nil, noopStore{}, false)
+	h := New(logger, config.Config{}, nil, nil, authn, nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/owner/projects", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /api/owner/projects = %d, want SPA fallback 200 when projects disabled", rec.Code)
 	}
 }
