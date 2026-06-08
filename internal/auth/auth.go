@@ -175,6 +175,14 @@ func OwnerFrom(ctx context.Context) (store.Owner, bool) {
 	return o, ok
 }
 
+// ContextWithOwner returns ctx carrying owner, the way RequireOwner does. In
+// production only RequireOwner (after validating a session) injects the Owner; this
+// helper lets owner-gated handlers in other packages be unit-tested against the real
+// OwnerFrom path without standing up the cookie/session machinery.
+func ContextWithOwner(ctx context.Context, owner store.Owner) context.Context {
+	return context.WithValue(ctx, ownerCtxKey{}, owner)
+}
+
 func (a *Authenticator) setCookie(w http.ResponseWriter, name, value string, ttl time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,

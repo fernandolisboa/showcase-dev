@@ -8,6 +8,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -135,6 +136,76 @@ func TestUsernameRoundTripAndUniqueness(t *testing.T) {
 	// An unknown username is ErrNotFound.
 	if _, err := s.OwnerByUsername(ctx, "nobody"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("OwnerByUsername(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestProjectRoundTripAndOwnership(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	alice, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+	bob, _ := s.UpsertOwnerByGitHubID(ctx, 200, "bob")
+
+	manifest := []byte(`{"Services":[{"Name":"web","Role":"ui"}]}`)
+	p, err := s.CreateProject(ctx, alice.ID, "blog", manifest)
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if p.ID == "" || p.OwnerID != alice.ID || p.Name != "blog" || p.Published {
+		t.Fatalf("unexpected project: %+v", p)
+	}
+	// jsonb reformats whitespace/key order, so assert a semantic round-trip, not bytes.
+	var back map[string]any
+	if err := json.Unmarshal(p.Manifest, &back); err != nil {
+		t.Fatalf("stored manifest is not valid JSON: %v (%s)", err, p.Manifest)
+	}
+	if _, ok := back["Services"]; !ok {
+		t.Errorf("manifest lost its services: %s", p.Manifest)
+	}
+
+	// Owner-scoped read returns it; another Owner cannot (no IDOR).
+	got, err := s.GetOwnerProject(ctx, alice.ID, p.ID)
+	if err != nil || got.ID != p.ID {
+		t.Fatalf("GetOwnerProject = (%+v, %v), want project %s", got, err, p.ID)
+	}
+	if _, err := s.GetOwnerProject(ctx, bob.ID, p.ID); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("cross-owner GetOwnerProject = %v, want ErrProjectNotFound", err)
+	}
+
+	// Per-owner unique name: alice can't reuse "blog"; bob can.
+	if _, err := s.CreateProject(ctx, alice.ID, "blog", manifest); !errors.Is(err, ErrProjectNameTaken) {
+		t.Errorf("duplicate name (same owner) = %v, want ErrProjectNameTaken", err)
+	}
+	if _, err := s.CreateProject(ctx, bob.ID, "blog", manifest); err != nil {
+		t.Errorf("same name, different owner should be allowed: %v", err)
+	}
+
+	// List is owner-scoped.
+	aliceProjects, err := s.ListProjectsByOwner(ctx, alice.ID)
+	if err != nil || len(aliceProjects) != 1 || aliceProjects[0].ID != p.ID {
+		t.Fatalf("ListProjectsByOwner(alice) = (%+v, %v), want exactly Alice's one project", aliceProjects, err)
+	}
+
+	// An unknown (but well-formed) id is ErrProjectNotFound.
+	if _, err := s.GetOwnerProject(ctx, alice.ID, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetOwnerProject(missing) = %v, want ErrProjectNotFound", err)
+	}
+	// A non-uuid id can never match the uuid PK: it is not-found, not a 500 (it also
+	// must not reach pgx, which cannot encode it for the uuid param).
+	if _, err := s.GetOwnerProject(ctx, alice.ID, "not-a-uuid"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetOwnerProject(non-uuid) = %v, want ErrProjectNotFound", err)
+	}
+
+	// FK cascade: deleting the Owner removes their Projects.
+	if _, err := s.pool.Exec(ctx, "DELETE FROM owners WHERE id = $1", alice.ID); err != nil {
+		t.Fatalf("delete owner: %v", err)
+	}
+	if _, err := s.GetOwnerProject(ctx, alice.ID, p.ID); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("project should be gone after the owner is deleted, got %v", err)
 	}
 }
 
