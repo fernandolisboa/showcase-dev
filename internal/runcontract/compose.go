@@ -14,6 +14,11 @@ func (p ExecutionPlan) ToCompose() ([]byte, error) {
 		// prefix) — the Runner and proxy attach to it by that name (ADR-0009).
 		Networks: map[string]composeNetwork{p.Network.Name: {Name: p.Network.Name, Internal: p.Network.Internal}},
 	}
+	// The optional egress network (ADR-0011) is non-internal — the one segment
+	// with a route out, joined solely by the egress-proxy sidecar.
+	if p.EgressNetwork != nil {
+		file.Networks[p.EgressNetwork.Name] = composeNetwork{Name: p.EgressNetwork.Name, Internal: p.EgressNetwork.Internal}
+	}
 	if len(p.Volumes) > 0 {
 		file.Volumes = make(map[string]composeVolume, len(p.Volumes))
 		for _, v := range p.Volumes {

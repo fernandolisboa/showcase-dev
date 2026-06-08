@@ -9,6 +9,11 @@ type ExecutionPlan struct {
 	// Network is the single isolated per-Session bridge. Internal == default-deny
 	// egress (ADR-0007).
 	Network NetworkSpec
+	// EgressNetwork is the optional second, non-internal network added only when a
+	// Project declares an egress allow-list (ADR-0011). It is the one segment with
+	// a route out, joined solely by the egress-proxy sidecar; app services never
+	// join it. Nil keeps the Session sealed default-deny.
+	EgressNetwork *NetworkSpec
 	// Volumes are platform-managed (named) volumes only — never host bind mounts.
 	Volumes []VolumeSpec
 	// Services are the containers in dependency order is expressed via DependsOn.
@@ -106,11 +111,12 @@ type Healthcheck struct {
 }
 
 // AppServices returns the UI and API services (everything the platform builds
-// from Owner repos), excluding the platform-provided DB and seed one-shot.
+// from Owner repos), excluding the platform-provided DB, the seed one-shot, and
+// the egress-proxy sidecar (ADR-0011) — all platform-owned, not Owner code.
 func (p ExecutionPlan) AppServices() []ServiceSpec {
 	out := make([]ServiceSpec, 0, len(p.Services))
 	for _, s := range p.Services {
-		if s.Name == dbServiceName || s.Name == seedServiceName {
+		if s.Name == dbServiceName || s.Name == seedServiceName || s.Name == egressServiceName {
 			continue
 		}
 		out = append(out, s)

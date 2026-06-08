@@ -4,13 +4,17 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 const (
-	defaultRuntime  = "runsc"
-	defaultAppUser  = "1000:1000"
-	dbServiceName   = "db"
-	seedServiceName = "seed"
+	defaultRuntime    = "runsc"
+	defaultAppUser    = "1000:1000"
+	dbServiceName     = "db"
+	seedServiceName   = "seed"
+	egressServiceName = "egress"
+	// egressProxyPort is the port the egress-proxy sidecar listens on, in-Stack.
+	egressProxyPort = 8888
 )
 
 // safeNameRE bounds the platform-supplied Project / NetworkName to a strict
@@ -22,8 +26,9 @@ const (
 var safeNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 var (
-	defaultAppResources = Resources{MemoryBytes: 512 << 20, CPUs: 1.0, PidsLimit: 256}
-	defaultDBResources  = Resources{MemoryBytes: 256 << 20, CPUs: 1.0, PidsLimit: 256}
+	defaultAppResources    = Resources{MemoryBytes: 512 << 20, CPUs: 1.0, PidsLimit: 256}
+	defaultDBResources     = Resources{MemoryBytes: 256 << 20, CPUs: 1.0, PidsLimit: 256}
+	defaultEgressResources = Resources{MemoryBytes: 64 << 20, CPUs: 0.5, PidsLimit: 64}
 )
 
 // DBCreds are the per-Session database credentials the platform mints (ADR-0003)
@@ -57,6 +62,15 @@ type Options struct {
 	DBCreds DBCreds
 	// PlatformEnv resolves every platform-sourced env var by name.
 	PlatformEnv map[string]string
+	// EgressProxyImage is the platform-owned forward-proxy image used for the
+	// egress-proxy sidecar (ADR-0011). Required only when the Manifest declares a
+	// non-empty Egress allow-list; it is platform-owned, not a per-Project image.
+	EgressProxyImage string
+	// EgressNetworkName overrides the second (non-internal) network's name
+	// (default Project+"-egress-net"). Only used when an allow-list is declared.
+	EgressNetworkName string
+	// EgressResources caps the egress-proxy sidecar; zero fields fall back to defaults.
+	EgressResources Resources
 }
 
 // Compile turns a validated Manifest into a locked-down ExecutionPlan. It is
@@ -74,6 +88,9 @@ func Compile(m Manifest, opts Options) (ExecutionPlan, error) {
 	}
 	if opts.NetworkName != "" && !safeNameRE.MatchString(opts.NetworkName) {
 		return ExecutionPlan{}, fmt.Errorf("options: networkName %q must match %s", opts.NetworkName, safeNameRE)
+	}
+	if opts.EgressNetworkName != "" && !safeNameRE.MatchString(opts.EgressNetworkName) {
+		return ExecutionPlan{}, fmt.Errorf("options: egressNetworkName %q must match %s", opts.EgressNetworkName, safeNameRE)
 	}
 
 	runtime := orDefault(opts.Runtime, defaultRuntime)
@@ -94,6 +111,23 @@ func Compile(m Manifest, opts Options) (ExecutionPlan, error) {
 	appEnv, err := resolveAppEnv(m.Env, opts.PlatformEnv)
 	if err != nil {
 		return ExecutionPlan{}, err
+	}
+
+	// Egress allow-list (ADR-0011): add the second (non-internal) network and the
+	// dual-homed proxy sidecar, and point Owner services at it. Done before the
+	// services are appended so the proxy env lands in their shared appEnv map. With
+	// no allow-list this whole block is skipped — the Stack is the sealed,
+	// default-deny Stack of ADR-0007, byte for byte.
+	if len(m.Egress) > 0 {
+		if opts.EgressProxyImage == "" {
+			return ExecutionPlan{}, errors.New("options: egressProxyImage is required when the manifest declares an egress allow-list")
+		}
+		egressNet := orDefault(opts.EgressNetworkName, opts.Project+"-egress-net")
+		plan.EgressNetwork = &NetworkSpec{Name: egressNet, Internal: false}
+		injectProxyEnv(appEnv, m.Services)
+		plan.Services = append(plan.Services, egressProxyService(
+			opts.EgressProxyImage, runtime, opts.EgressResources.orDefault(defaultEgressResources),
+			netName, egressNet, m.Egress))
 	}
 
 	// Ordering target the app services wait on: the seed if present, else the DB.
@@ -212,6 +246,77 @@ func dbService(db *DB, creds DBCreds, runtime string, res Resources, net, volume
 			Retries:  5,
 		},
 	}
+}
+
+// injectProxyEnv points Owner services at the egress-proxy sidecar (ADR-0011).
+// HTTP(S)_PROXY is the convenience path for well-behaved apps; NO_PROXY keeps
+// intra-Stack traffic (app→db, ui→api) off the proxy. Validate has already
+// rejected any Owner-set proxy key, so these never clobber a declared value.
+// Both cases are set since stdlib clients vary on which they read.
+func injectProxyEnv(env map[string]string, services []Service) {
+	proxyURL := fmt.Sprintf("http://%s:%d", egressServiceName, egressProxyPort)
+	noProxy := egressNoProxy(services)
+	for k, v := range map[string]string{
+		"HTTP_PROXY":  proxyURL,
+		"HTTPS_PROXY": proxyURL,
+		"http_proxy":  proxyURL,
+		"https_proxy": proxyURL,
+		"NO_PROXY":    noProxy,
+		"no_proxy":    noProxy,
+	} {
+		env[k] = v
+	}
+}
+
+// egressNoProxy lists the intra-Stack destinations that must never traverse the
+// proxy: loopback, the DB host, and every Owner service name.
+func egressNoProxy(services []Service) string {
+	hosts := []string{"localhost", "127.0.0.1", dbServiceName}
+	for _, s := range services {
+		hosts = append(hosts, s.Name)
+	}
+	return strings.Join(hosts, ",")
+}
+
+// egressProxyService builds the dual-homed egress-proxy sidecar. It is trusted
+// platform code but reachable by untrusted Owner code, so it carries the same
+// hardening baseline as an app service (non-root, cap-drop ALL, read-only rootfs,
+// no-new-privileges) plus a small resource cap and a self-dialing healthcheck. It
+// joins BOTH the sealed internal net (where apps reach it) and the egress net
+// (the only route out) — the single bridge between routeless apps and the
+// outside. The validated allow-list is rendered into EGRESS_ALLOWLIST.
+func egressProxyService(image, runtime string, res Resources, internalNet, egressNet string, rules []EgressRule) ServiceSpec {
+	return ServiceSpec{
+		Name:           egressServiceName,
+		Image:          image,
+		Runtime:        runtime,
+		Resources:      res,
+		Networks:       []string{internalNet, egressNet},
+		Env:            map[string]string{"EGRESS_ALLOWLIST": renderAllowlist(rules)},
+		User:           defaultAppUser,
+		ReadOnlyRootFS: true,
+		CapDrop:        []string{"ALL"},
+		SecurityOpt:    []string{"no-new-privileges:true"},
+		Restart:        "on-failure",
+		Healthcheck: &Healthcheck{
+			Test:        []string{"CMD", "/egress-proxy", "-healthcheck"},
+			Interval:    "5s",
+			Timeout:     "3s",
+			Retries:     5,
+			StartPeriod: "3s",
+		},
+	}
+}
+
+// renderAllowlist serializes the validated rules to the EGRESS_ALLOWLIST wire
+// form the proxy reads: comma-separated host:port. The contract is the source of
+// truth (already validated); the proxy only enforces this rendered list.
+func renderAllowlist(rules []EgressRule) string {
+	parts := make([]string, len(rules))
+	for i, r := range rules {
+		parts[i] = fmt.Sprintf("%s:%d", r.Host, r.Port)
+	}
+	return strings.Join(parts, ",")
 }
 
 // resolveAppEnv resolves static and platform env, skipping deferred owner env.

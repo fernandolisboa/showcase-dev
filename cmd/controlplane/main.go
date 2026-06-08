@@ -125,6 +125,7 @@ func main() {
 		source,
 		runner.WithRuntime(cfg.Runtime),
 		runner.WithProxy(registry, cfg.TraefikContainer),
+		runner.WithEgressProxyImage(cfg.EgressProxyImage),
 	)
 	sessions := session.NewManager(compose, registry, cfg.DemoScheme, cfg.MaxSessions, logger)
 

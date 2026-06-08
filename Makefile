@@ -5,6 +5,9 @@ BIN := bin/controlplane
 # Explicit roots so Go tooling never descends into web/node_modules (some npm
 # packages ship stray .go files).
 GO_PKGS := ./cmd/... ./internal/...
+# Platform-owned egress-proxy sidecar image tag (ADR-0011); must match the
+# control plane's EGRESS_PROXY_IMAGE (internal/config default).
+EGRESS_PROXY_IMAGE ?= showcase-dev/egress-proxy:latest
 
 .PHONY: help
 help: ## Show this help
@@ -56,6 +59,11 @@ db-up: ## Start local Postgres (compose.dev.yml)
 	docker compose -f compose.dev.yml up -d
 db-down: ## Stop local Postgres
 	docker compose -f compose.dev.yml down
+
+# --- Platform images ---------------------------------------------------------
+.PHONY: egress-proxy-image
+egress-proxy-image: ## Build the per-Session egress-proxy sidecar image (ADR-0011)
+	docker build -t $(EGRESS_PROXY_IMAGE) -f cmd/egress-proxy/Dockerfile .
 
 # --- Live-Session proxy (Traefik) --------------------------------------------
 proxy-up: ## Start Traefik in front of Sessions (run the control plane first)

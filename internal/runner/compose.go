@@ -40,6 +40,10 @@ type Compose struct {
 	bootLimit string          // --wait-timeout for `compose up`
 	registry  *proxy.Registry // optional; nil = no proxy integration (e.g. #8 tests)
 	traefik   string          // Traefik container to attach to each Session network
+	// egressProxyImage is the platform-owned forward-proxy image for the egress
+	// allow-list sidecar (ADR-0011). Required only when a Project declares an
+	// allow-list; the image is platform-owned, not a per-Project image.
+	egressProxyImage string
 }
 
 // Option configures a Compose runner.
@@ -64,6 +68,13 @@ func WithProxy(registry *proxy.Registry, traefikContainer string) Option {
 		c.registry = registry
 		c.traefik = traefikContainer
 	}
+}
+
+// WithEgressProxyImage sets the platform-owned image used for a Session's egress
+// allow-list sidecar (ADR-0011). Needed only when a Project declares an egress
+// allow-list; the compiler errors if a list is declared without it.
+func WithEgressProxyImage(image string) Option {
+	return func(c *Compose) { c.egressProxyImage = image }
 }
 
 // NewCompose builds a Compose runner over the given ProjectSource.
@@ -275,10 +286,11 @@ func healthyFromPS(services []composePS) bool {
 // caller can scrub them from any surfaced compose output.
 func (c *Compose) buildPlan(proj Project, sessionID string) (runcontract.ExecutionPlan, string, []string, error) {
 	opts := runcontract.Options{
-		Project:     ProjectName(sessionID),
-		NetworkName: NetworkName(sessionID),
-		Runtime:     c.runtime,
-		Images:      proj.Images,
+		Project:          ProjectName(sessionID),
+		NetworkName:      NetworkName(sessionID),
+		Runtime:          c.runtime,
+		Images:           proj.Images,
+		EgressProxyImage: c.egressProxyImage,
 	}
 
 	var url string

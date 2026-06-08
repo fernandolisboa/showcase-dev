@@ -59,6 +59,17 @@ func TestMaxCachedImagesParsesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestEgressProxyImageParsesAndDefaults(t *testing.T) {
+	t.Setenv("EGRESS_PROXY_IMAGE", "ghcr.io/me/egress-proxy:pinned")
+	if got := Load().EgressProxyImage; got != "ghcr.io/me/egress-proxy:pinned" {
+		t.Errorf("EgressProxyImage = %q, want override", got)
+	}
+	t.Setenv("EGRESS_PROXY_IMAGE", "")
+	if got := Load().EgressProxyImage; got != "showcase-dev/egress-proxy:latest" {
+		t.Errorf("EgressProxyImage = %q, want default", got)
+	}
+}
+
 func TestBuildSandboxTunablesParseAndDefault(t *testing.T) {
 	t.Setenv("BUILD_SANDBOX_IMAGE", "ghcr.io/me/buildkit:pinned")
 	t.Setenv("BUILD_NETWORK", "custom-build-net")

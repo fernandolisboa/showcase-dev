@@ -47,6 +47,10 @@ type Config struct {
 	// TraefikContainer is the Traefik container the Runner attaches to each Session
 	// network so it can reach the live Stack (#9).
 	TraefikContainer string
+	// EgressProxyImage is the platform-owned forward-proxy image for a Session's
+	// egress allow-list sidecar (ADR-0011). Used only when a Project declares an
+	// allow-list; the compiler errors if a list is declared without it.
+	EgressProxyImage string
 	// DemoScheme is the URL scheme for Session links ("http" dev, "https" prod).
 	DemoScheme string
 	// IdleTimeout tears down a Session after this long with no Guest activity —
@@ -115,6 +119,7 @@ func Load() Config {
 		SplashPort:        getenvInt("SPLASH_PORT", 8082),
 		Runtime:           getenv("RUNTIME", "runsc"),
 		TraefikContainer:  getenv("TRAEFIK_CONTAINER", "showcase-traefik"),
+		EgressProxyImage:  getenv("EGRESS_PROXY_IMAGE", "showcase-dev/egress-proxy:latest"),
 		DemoScheme:        getenv("DEMO_SCHEME", "http"),
 		IdleTimeout:       getenvDuration("IDLE_TIMEOUT", 15*time.Minute),
 		MaxRuntime:        getenvDuration("MAX_RUNTIME", 45*time.Minute),

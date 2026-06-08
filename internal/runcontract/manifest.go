@@ -48,6 +48,18 @@ type Manifest struct {
 	Env      []EnvVar
 	// Seed is an optional one-shot run against the fresh DB before readiness.
 	Seed *Seed
+	// Egress is the runtime outbound allow-list (ADR-0011). Empty keeps the
+	// Session sealed default-deny (ADR-0007); a non-empty list adds a dual-homed
+	// egress-proxy sidecar that forwards only to these host:port pairs.
+	Egress []EgressRule
+}
+
+// EgressRule is one allowed outbound destination: a host (hostname or IP) and a
+// port. It is the run contract's source of truth for what the egress proxy may
+// forward to; the proxy never widens it (ADR-0011).
+type EgressRule struct {
+	Host string
+	Port int
 }
 
 // Service is one container in the Stack, built from the Owner's repo.
@@ -100,9 +112,25 @@ var supportedDBEngines = map[string]bool{"postgres": true}
 // "no untrusted code in trusted slots" invariant (ADR-0003). Validate rejects
 // them so the collision can never reach the renderer.
 var reservedServiceNames = map[string]bool{
-	dbServiceName:   true,
-	seedServiceName: true,
+	dbServiceName:     true,
+	seedServiceName:   true,
+	egressServiceName: true,
 }
+
+// reservedEnvNames are the env keys the platform owns to wire apps to the egress
+// proxy (ADR-0011). An Owner may not set them: letting Owner code override
+// HTTP_PROXY/NO_PROXY would let an app redirect or disable its own egress
+// routing. Compared case-insensitively, since the convention has both cases.
+var reservedEnvNames = map[string]bool{
+	"http_proxy":  true,
+	"https_proxy": true,
+	"no_proxy":    true,
+}
+
+// egressHostRE bounds an egress allow-list host to a hostname or IPv4 literal: no
+// scheme, no path, no port, no wildcard. The port is a separate field. This
+// rejects malformed rules ("http://x", "x:80", "*.evil.com") at the contract.
+var egressHostRE = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
 
 // Validate reports every problem with the Manifest at once (ADR-0003: the
 // platform builds strictly from an explicit, well-formed contract).
@@ -187,11 +215,28 @@ func (m Manifest) Validate() error {
 		}
 		if e.Name == "" {
 			errs = append(errs, fmt.Errorf("%s: name is required", where))
+		} else if reservedEnvNames[strings.ToLower(e.Name)] {
+			errs = append(errs, fmt.Errorf("%s: name is reserved for platform egress routing (ADR-0011)", where))
 		}
 		switch e.Source {
 		case EnvPlatform, EnvStatic, EnvOwner:
 		default:
 			errs = append(errs, fmt.Errorf("%s: source must be platform|static|owner, got %q", where, e.Source))
+		}
+	}
+
+	for i, r := range m.Egress {
+		where := fmt.Sprintf("egress[%d]", i)
+		if r.Host != "" {
+			where = fmt.Sprintf("egress %q", r.Host)
+		}
+		if r.Host == "" {
+			errs = append(errs, fmt.Errorf("%s: host is required", where))
+		} else if !egressHostRE.MatchString(r.Host) {
+			errs = append(errs, fmt.Errorf("%s: host must be a bare hostname or IP (no scheme, port, path, or wildcard)", where))
+		}
+		if r.Port < 1 || r.Port > 65535 {
+			errs = append(errs, fmt.Errorf("%s: port %d out of range 1-65535", where, r.Port))
 		}
 	}
 
