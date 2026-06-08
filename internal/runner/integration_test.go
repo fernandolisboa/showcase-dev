@@ -86,8 +86,14 @@ func TestProvisionBootsReachableStackThenTeardownLeavesNothing(t *testing.T) {
 	}
 
 	// Default-deny egress (ADR-0007): the same internal network cannot reach out.
+	// By hostname (the obvious case)...
 	if _, err := dockerRun(ctx, network, "-s", "--max-time", "8", "https://example.com"); err == nil {
-		t.Error("expected egress to be denied on the internal Session network")
+		t.Error("expected egress to a hostname to be denied on the internal Session network")
+	}
+	// ...and by raw IP, so this proves an L3 route-less deny, not just a DNS lookup
+	// that fails to resolve. A literal address skips name resolution entirely.
+	if _, err := dockerRun(ctx, network, "-s", "--max-time", "8", "https://1.1.1.1"); err == nil {
+		t.Error("expected egress to a raw IP to be denied on the internal Session network")
 	}
 
 	if err := r.Teardown(ctx, sessionID); err != nil {

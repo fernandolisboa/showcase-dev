@@ -76,6 +76,12 @@ type composeFile struct {
 	Volumes  map[string]composeVolume  `yaml:"volumes,omitempty"`
 }
 
+// composeService is the platform-generated service. It deliberately has NO
+// network_mode field: an Owner declares only a Manifest, the platform renders the
+// Compose, and there is nothing here that can emit `network_mode: host` — so host
+// networking (which would bypass the per-Session bridge and its default-deny
+// egress) is structurally unrepresentable, not merely unused (ADR-0007). Services
+// join only the per-Session network via Networks. Guarded by TestNoHostNetworking.
 type composeService struct {
 	Image       string                       `yaml:"image"`
 	Runtime     string                       `yaml:"runtime,omitempty"`
