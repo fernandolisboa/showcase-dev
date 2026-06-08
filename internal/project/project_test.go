@@ -21,11 +21,36 @@ import (
 // real store enforces in SQL.
 type fakeStore struct {
 	byOwner map[int64][]store.Project
+	owners  map[string]store.Owner // by username, for the portfolio lookup
 	nextID  int
 	failGet bool // force a non-NotFound error path
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{byOwner: map[int64][]store.Project{}} }
+func newFakeStore() *fakeStore {
+	return &fakeStore{byOwner: map[int64][]store.Project{}, owners: map[string]store.Owner{}}
+}
+
+func (f *fakeStore) OwnerByUsername(_ context.Context, username string) (store.Owner, error) {
+	o, ok := f.owners[username]
+	if !ok {
+		return store.Owner{}, store.ErrNotFound
+	}
+	return o, nil
+}
+
+func (f *fakeStore) ListPublishedProjectsByUsername(_ context.Context, username string) ([]store.Project, error) {
+	o, ok := f.owners[username]
+	if !ok {
+		return nil, nil
+	}
+	var pub []store.Project
+	for _, p := range f.byOwner[o.ID] {
+		if p.Published {
+			pub = append(pub, p)
+		}
+	}
+	return pub, nil
+}
 
 func (f *fakeStore) CreateProject(_ context.Context, ownerID int64, name string, manifest []byte) (store.Project, error) {
 	for _, p := range f.byOwner[ownerID] {
@@ -384,6 +409,74 @@ func TestPublishRequiresOwner(t *testing.T) {
 	h.Publish(rec, r)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("publish without an Owner = %d, want 401", rec.Code)
+	}
+}
+
+func portfolio(t *testing.T, h *Handlers, username string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/portfolio/"+username, nil)
+	r.SetPathValue("username", username)
+	h.Portfolio(rec, r)
+	return rec
+}
+
+func TestPortfolioListsOnlyPublished(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, &fakeBuilder{commit: "c"})
+	// GitHubLogin must match validForm's repo owner ("me") so publish passes.
+	alice := store.Owner{ID: 1, Username: "alice", GitHubLogin: "me"}
+	fs.owners["alice"] = alice
+
+	published := createProject(t, h, validForm(), alice)
+	draftForm := validForm()
+	draftForm.Name = "draft"
+	createProject(t, h, draftForm, alice) // left unpublished
+	if rec := publish(t, h, published, alice); rec.Code != http.StatusOK {
+		t.Fatalf("publish setup = %d, body=%s", rec.Code, rec.Body)
+	}
+
+	rec := portfolio(t, h, "Alice") // case-insensitive
+	if rec.Code != http.StatusOK {
+		t.Fatalf("portfolio = %d, body=%s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Owner    map[string]any   `json:"owner"`
+		Projects []map[string]any `json:"projects"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got.Owner["username"] != "alice" {
+		t.Errorf("owner = %v", got.Owner)
+	}
+	if len(got.Projects) != 1 || got.Projects[0]["name"] != "blog" {
+		t.Errorf("portfolio must list only the published project, got %v", got.Projects)
+	}
+}
+
+func TestPortfolioUnknownUserIs404(t *testing.T) {
+	h := NewHandlers(newFakeStore(), nil)
+	if rec := portfolio(t, h, "nobody"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown user = %d, want 404", rec.Code)
+	}
+}
+
+func TestPortfolioEmptyWhenNothingPublished(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, &fakeBuilder{})
+	alice := store.Owner{ID: 1, Username: "alice", GitHubLogin: "me"}
+	fs.owners["alice"] = alice
+	createProject(t, h, validForm(), alice) // draft only
+
+	rec := portfolio(t, h, "alice")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("= %d, want 200 with an empty list", rec.Code)
+	}
+	var got struct {
+		Projects []map[string]any `json:"projects"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if len(got.Projects) != 0 {
+		t.Errorf("a draft must not appear in the public portfolio: %v", got.Projects)
 	}
 }
 

@@ -124,6 +124,29 @@ FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
+	return scanProjects(rows)
+}
+
+// ListPublishedProjectsByUsername returns the PUBLISHED Projects of the Owner with
+// the given showcase username, newest first — the public Portfolio listing
+// (ADR-0005). An unknown/unclaimed username (or one with no published Projects)
+// yields an empty slice; the caller uses OwnerByUsername to tell "no such Owner" from
+// "Owner with nothing published".
+func (s *Store) ListPublishedProjectsByUsername(ctx context.Context, username string) ([]Project, error) {
+	const q = `
+SELECT p.id, p.owner_id, p.name, p.manifest, p.published, COALESCE(p.commit_sha, '') AS commit_sha, p.created_at, p.updated_at
+FROM projects p JOIN owners o ON o.id = p.owner_id
+WHERE o.username = $1 AND p.published
+ORDER BY p.created_at DESC`
+	rows, err := s.pool.Query(ctx, q, username)
+	if err != nil {
+		return nil, fmt.Errorf("list published projects: %w", err)
+	}
+	return scanProjects(rows)
+}
+
+// scanProjects drains rows into Projects (shared by the list queries).
+func scanProjects(rows pgx.Rows) ([]Project, error) {
 	defer rows.Close()
 	var ps []Project
 	for rows.Next() {
@@ -134,7 +157,7 @@ FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 		ps = append(ps, p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list projects: %w", err)
+		return nil, fmt.Errorf("scan projects: %w", err)
 	}
 	return ps, nil
 }

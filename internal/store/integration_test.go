@@ -227,6 +227,20 @@ func TestProjectRoundTripAndOwnership(t *testing.T) {
 		t.Errorf("GetPublishedProject(non-uuid) = %v, want ErrProjectNotFound", err)
 	}
 
+	// Portfolio: the published Project appears under the Owner's username; an unknown
+	// username lists nothing. (Alice's other Project stays a draft, so it must not
+	// appear — but here Alice has only "blog", now published.)
+	if err := s.SetUsername(ctx, alice.ID, "alice-dev"); err != nil {
+		t.Fatalf("set username: %v", err)
+	}
+	pf, err := s.ListPublishedProjectsByUsername(ctx, "alice-dev")
+	if err != nil || len(pf) != 1 || pf[0].ID != p.ID {
+		t.Fatalf("ListPublishedProjectsByUsername(alice-dev) = (%+v, %v), want the one published project", pf, err)
+	}
+	if empty, err := s.ListPublishedProjectsByUsername(ctx, "nobody"); err != nil || len(empty) != 0 {
+		t.Errorf("unknown username should list nothing, got (%v, %v)", empty, err)
+	}
+
 	// FK cascade: deleting the Owner removes their Projects.
 	if _, err := s.pool.Exec(ctx, "DELETE FROM owners WHERE id = $1", alice.ID); err != nil {
 		t.Fatalf("delete owner: %v", err)
