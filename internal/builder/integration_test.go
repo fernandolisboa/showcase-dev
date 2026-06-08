@@ -9,8 +9,11 @@ package builder
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -156,6 +159,44 @@ func TestPerSessionSeedDataIsolated(t *testing.T) {
 	if b := curl(ctx, t, netB, apiB+"/api/items"); strings.Contains(b, mark) {
 		t.Errorf("session B must not see session A's write, got %q", b)
 	}
+}
+
+// TestBuildHasEgress pins ADR-0007's other half: build-time egress stays
+// PERMITTED. Unlike the sealed runtime Stack (internal network, default-deny),
+// builds run on the default bridge with internet access to fetch dependencies. It
+// builds a tiny image whose RUN step needs the network (apk fetches a package); if
+// a future build-sandbox change cut egress, this build — and real Owner builds —
+// would fail.
+func TestBuildHasEgress(t *testing.T) {
+	if err := exec.Command("docker", "version").Run(); err != nil {
+		t.Skip("docker not available; skipping build-egress test")
+	}
+
+	dir := t.TempDir()
+	const dockerfile = "Dockerfile"
+	// The unique `RUN echo` busts the Docker layer cache so the apk fetch below
+	// actually re-executes every run — a warm cache would skip it and prove nothing
+	// about egress. alpine:3.21 is a recent, supported base; `apk add` reaching the
+	// Alpine CDN is the network signal (it fails if the build has no egress).
+	content := fmt.Sprintf("FROM alpine:3.21\nRUN echo %d\nRUN apk add --no-cache tzdata\n", time.Now().UnixNano())
+	if err := os.WriteFile(filepath.Join(dir, dockerfile), []byte(content), 0o644); err != nil {
+		t.Fatalf("write dockerfile: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	logger := slog.New(slog.NewTextHandler(testWriter{t}, nil))
+	tag, err := New(20, logger).Build(ctx, BuildSpec{
+		ImageName:  "showcase-test/build-egress",
+		Version:    "v1",
+		Dockerfile: dockerfile,
+		Context:    func() (string, func(), error) { return dir, func() {}, nil },
+	})
+	if err != nil {
+		t.Fatalf("a build whose RUN needs the network failed; build egress must be permitted (ADR-0007): %v", err)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", tag).Run() })
 }
 
 // buildFixture builds the embedded UI + API images from source ("publish" warm)
