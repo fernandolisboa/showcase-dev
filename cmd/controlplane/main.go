@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fernandolisboa/showcase-dev/internal/auth"
 	"github.com/fernandolisboa/showcase-dev/internal/builder"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
 	"github.com/fernandolisboa/showcase-dev/internal/fixture"
@@ -48,9 +49,10 @@ func main() {
 	// pool and run migrations before serving — a misconfigured DB or a failed
 	// migration is fatal, so the process never comes up half-migrated. When it is
 	// unset (the dependency-free dev loop), persistence is disabled and /readyz
-	// reports ready without a store; the Owner/Project features built on it in
-	// later #19 slices simply aren't wired. `ready` is the /readyz DB probe.
+	// reports ready without a store; the Owner features built on it simply aren't
+	// wired. `ready` is the /readyz DB probe; `dbStore` backs Owner sign-in.
 	var ready func(context.Context) error
+	var dbStore *store.Store
 	if cfg.DatabaseURL != "" {
 		st, err := store.Open(context.Background(), cfg.DatabaseURL)
 		if err != nil {
@@ -65,10 +67,38 @@ func main() {
 			os.Exit(1)
 		}
 		migrateCancel()
+		dbStore = st
 		ready = st.Ping
 		logger.Info("control-plane persistence ready (migrations applied)")
 	} else {
-		logger.Warn("DATABASE_URL not set; control-plane persistence disabled (dev) — Owner/Project features are off")
+		logger.Warn("DATABASE_URL not set; control-plane persistence disabled (dev) — Owner sign-in is off")
+	}
+
+	// Owner sign-in (ADR-0008, issue #19). Needs persistence; the GitHub App
+	// (issue #4) is registered by a human, so when its credentials are absent we
+	// still build the Authenticator (sessions validate) but Login/Callback report
+	// 501 — the dev loop runs without a real App.
+	var authn *auth.Authenticator
+	if dbStore != nil {
+		var provider auth.IdentityProvider
+		if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {
+			callback := cfg.OAuthCallbackURL
+			if callback == "" {
+				callback = fmt.Sprintf("http://localhost:%d/auth/github/callback", cfg.Port)
+			}
+			provider = auth.NewGitHubProvider(cfg.GitHubClientID, cfg.GitHubClientSecret, callback)
+			logger.Info("owner sign-in enabled (github app configured)")
+		} else {
+			logger.Warn("GitHub App credentials not set; Owner sign-in disabled (login returns 501) — see docs/ops/04-register-github-app.md")
+		}
+		authn = auth.New(provider, dbStore, cfg.Env == "prod")
+
+		// Expired login sessions are already rejected at query time, but prune them
+		// so the table doesn't grow unbounded. Runs for the process lifetime,
+		// cancelled at shutdown.
+		pruneCtx, stopPrune := context.WithCancel(context.Background())
+		defer stopPrune()
+		go pruneLoginSessions(pruneCtx, dbStore, logger)
 	}
 
 	// Traefik-facing surface, split across two listeners so a Demo can never reach
@@ -198,7 +228,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID), ready),
+		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID), ready, authn),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -208,6 +238,28 @@ func main() {
 
 	if err := run(ctx, stop, logger, srv, sessions, cfg.Addr(), cfg.Env); err != nil {
 		os.Exit(1)
+	}
+}
+
+// pruneLoginSessions periodically deletes expired web login sessions until ctx is
+// cancelled. Errors are logged, not fatal — a missed prune only delays cleanup,
+// and expired sessions are already rejected at query time.
+func pruneLoginSessions(ctx context.Context, st *store.Store, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		if n, err := st.DeleteExpiredLoginSessions(ctx); err != nil {
+			if ctx.Err() == nil {
+				logger.Warn("prune expired login sessions", "err", err)
+			}
+		} else if n > 0 {
+			logger.Info("pruned expired login sessions", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

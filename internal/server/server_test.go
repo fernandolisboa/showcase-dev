@@ -12,7 +12,7 @@ import (
 
 func newTestServer(play http.Handler) http.Handler {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(logger, config.Config{}, play, nil)
+	return New(logger, config.Config{}, play, nil, nil)
 }
 
 // The spin-up API must be reachable through New's mux at POST /api/play, and the
