@@ -58,6 +58,8 @@ func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(con
 			mux.Handle("POST /api/owner/projects", authn.RequireOwner(http.HandlerFunc(projects.Create)))
 			mux.Handle("GET /api/owner/projects", authn.RequireOwner(http.HandlerFunc(projects.List)))
 			mux.Handle("GET /api/owner/projects/{id}", authn.RequireOwner(http.HandlerFunc(projects.Get)))
+			// Publishing builds the Project from source and marks it playable (#19).
+			mux.Handle("POST /api/owner/projects/{id}/publish", authn.RequireOwner(http.HandlerFunc(projects.Publish)))
 		}
 	}
 

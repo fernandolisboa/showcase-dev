@@ -77,6 +77,7 @@ func (noopProjectStore) GetOwnerProject(context.Context, int64, string) (store.P
 func (noopProjectStore) ListProjectsByOwner(context.Context, int64) ([]store.Project, error) {
 	return nil, nil
 }
+func (noopProjectStore) PublishProject(context.Context, int64, string, string) error { return nil }
 
 // With both an Authenticator and project Handlers wired, the Owner project routes
 // are mounted and gated: an anonymous request gets 401 (RequireOwner), not the SPA
@@ -84,7 +85,7 @@ func (noopProjectStore) ListProjectsByOwner(context.Context, int64) ([]store.Pro
 func TestProjectRoutesMountedWhenPresent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	authn := auth.New(nil, noopStore{}, false)
-	projects := project.NewHandlers(noopProjectStore{})
+	projects := project.NewHandlers(noopProjectStore{}, nil)
 	h := New(logger, config.Config{}, nil, nil, authn, projects)
 
 	for _, tc := range []struct {

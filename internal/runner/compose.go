@@ -21,6 +21,11 @@ import (
 type Project struct {
 	Manifest runcontract.Manifest
 	Images   map[string]string
+	// Commit pins which source commit the services build from. The play path sets it
+	// to the project's PUBLISHED commit so a Guest gets exactly that version and never
+	// waits on a rebuild from a moved HEAD. Empty means "resolve the default branch" —
+	// used at publish, where a BuildingSource fills the resolved commit on the way out.
+	Commit string
 }
 
 // ProjectSource resolves a Project by id. In the MVP this is a static fixture

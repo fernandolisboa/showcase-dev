@@ -206,12 +206,22 @@ func TestProjectRoundTripAndOwnership(t *testing.T) {
 	if _, err := s.GetPublishedProject(ctx, p.ID); !errors.Is(err, ErrProjectNotFound) {
 		t.Errorf("GetPublishedProject(draft) = %v, want ErrProjectNotFound", err)
 	}
-	if _, err := s.pool.Exec(ctx, "UPDATE projects SET published = true WHERE id = $1", p.ID); err != nil {
-		t.Fatalf("publish: %v", err)
+	// Publishing flips published AND records the built commit, owner-scoped. A
+	// cross-owner publish affects no row.
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	if err := s.PublishProject(ctx, bob.ID, p.ID, sha); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("cross-owner PublishProject = %v, want ErrProjectNotFound", err)
+	}
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+		t.Fatalf("PublishProject: %v", err)
 	}
 	pub, err := s.GetPublishedProject(ctx, p.ID)
 	if err != nil || pub.ID != p.ID || !pub.Published {
 		t.Fatalf("GetPublishedProject(published) = (%+v, %v), want the published project", pub, err)
+	}
+	// The commit SHA round-trips through the play read path (the SpecFunc reads it).
+	if pub.CommitSHA != sha {
+		t.Errorf("published commit_sha = %q, want %q", pub.CommitSHA, sha)
 	}
 	if _, err := s.GetPublishedProject(ctx, "fixture"); !errors.Is(err, ErrProjectNotFound) {
 		t.Errorf("GetPublishedProject(non-uuid) = %v, want ErrProjectNotFound", err)

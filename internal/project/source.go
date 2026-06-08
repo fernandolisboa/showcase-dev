@@ -47,5 +47,9 @@ func (s *Source) Project(ctx context.Context, projectID string) (runner.Project,
 		// to not-found would silently boot the fallback fixture in its place.
 		return runner.Project{}, fmt.Errorf("decode manifest for project %s: %w", projectID, err)
 	}
-	return runner.Project{Manifest: m, Images: map[string]string{}}, nil
+	// Pin the build to the PUBLISHED commit so the play build is a cache hit on the
+	// image built at publish — a Guest gets exactly the published version and never
+	// waits on a rebuild from a moved HEAD (#19). Images stay empty; the BuildingSource
+	// that wraps this fills them (from cache on a hit).
+	return runner.Project{Manifest: m, Commit: p.CommitSHA, Images: map[string]string{}}, nil
 }

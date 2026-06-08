@@ -46,10 +46,12 @@ web-dev: ## Run the Vite dev server (proxies /api + /healthz to :8080)
 build: web-install web-build go-build ## Full build: UI embedded into the binary
 test: go-test web-test ## Run all tests
 lint: go-lint web-lint ## Run all linters
+# Env precedence: .env (shared defaults) then .env.local (gitignored local secrets,
+# e.g. the GitHub App private key) so a local override wins. Both optional.
 run: build ## Build everything, then run the control plane
-	@set -a; [ -f .env ] && . ./.env; set +a; ./$(BIN)
+	@set -a; [ -f .env ] && . ./.env; [ -f .env.local ] && . ./.env.local; set +a; ./$(BIN)
 dev: ## Run the Go control plane (serves a placeholder until the UI is built)
-	@set -a; [ -f .env ] && . ./.env; set +a; go run ./cmd/controlplane
+	@set -a; [ -f .env ] && . ./.env; [ -f .env.local ] && . ./.env.local; set +a; go run ./cmd/controlplane
 clean: ## Remove build artifacts
 	rm -rf $(BIN)
 

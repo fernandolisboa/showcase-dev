@@ -21,6 +21,7 @@ import (
 	"github.com/fernandolisboa/showcase-dev/internal/builder"
 	"github.com/fernandolisboa/showcase-dev/internal/config"
 	"github.com/fernandolisboa/showcase-dev/internal/fixture"
+	"github.com/fernandolisboa/showcase-dev/internal/githubapp"
 	"github.com/fernandolisboa/showcase-dev/internal/project"
 	"github.com/fernandolisboa/showcase-dev/internal/proxy"
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
@@ -80,12 +81,8 @@ func main() {
 	// still build the Authenticator (sessions validate) but Login/Callback report
 	// 501 — the dev loop runs without a real App.
 	var authn *auth.Authenticator
-	var projects *project.Handlers
+	var projects *project.Handlers // built below, once the image builder exists
 	if dbStore != nil {
-		// Owner project config (#19) is backed by the same store and gated by the
-		// same sign-in; it is mounted only alongside the Authenticator.
-		projects = project.NewHandlers(dbStore)
-
 		var provider auth.IdentityProvider
 		if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {
 			callback := cfg.OAuthCallbackURL
@@ -165,22 +162,27 @@ func main() {
 		Timeout:   cfg.BuildTimeout,
 	}))
 	fixtureProject := runner.Project{Manifest: fixture.Manifest(), Images: map[string]string{}}
-	// The base source the builder wraps resolves a Project by id. Without a database
-	// it is just the demo fixture (StaticSource ignores the id, #8). With one, it
-	// resolves a published Owner Project from the DB first and falls back to the
-	// fixture when the id isn't a published Project — so the hand-configured demo
-	// keeps booting even with persistence wired and nothing published yet (#19; build
-	// at publish makes Owner Projects bootable in a later slice).
-	var base runner.ProjectSource = runner.StaticSource{P: fixtureProject}
-	if dbStore != nil {
-		base = runner.FallbackSource{
-			Primary:   project.NewSource(dbStore),
-			Secondary: base,
+
+	// Owner repos are built from source at publish via a GitHub App installation token
+	// (ADR-0008). The App's OWN credentials (numeric id + private key) are distinct
+	// from the OAuth client used for sign-in; absent them, building Owner repos is
+	// disabled (publish returns 501) but the demo still builds from the embedded
+	// fixture. A bad key is logged and treated as absent, never fatal.
+	var ghClient *githubapp.Client
+	if cfg.GitHubAppID != "" && cfg.GitHubAppPrivateKey != "" {
+		if c, err := githubapp.New(cfg.GitHubAppID, cfg.GitHubAppPrivateKey); err != nil {
+			logger.Error("GitHub App credentials invalid; building Owner repos disabled", "err", err)
+		} else {
+			ghClient = c
+			logger.Info("owner repo builds enabled (github app configured)")
 		}
 	}
-	source := builder.NewBuildingSource(
-		base, imageBuilder,
-		func(projectID string, svc runcontract.Service) (builder.BuildSpec, error) {
+
+	// specFunc resolves each service to its build spec. The fixture builds from its
+	// embedded context; a real Owner Project (a uuid id) clones its repo at the pinned
+	// commit (play) or the resolved default-branch HEAD (publish) via the App token.
+	specFunc := func(ctx context.Context, projectID string, svc runcontract.Service, commit string) (builder.BuildSpec, error) {
+		if projectID == fixtureProjectID {
 			version, err := fixture.Version(svc.Name)
 			if err != nil {
 				return builder.BuildSpec{}, err
@@ -191,9 +193,65 @@ func main() {
 				Dockerfile: fixture.Dockerfile,
 				Context:    func() (string, func(), error) { return fixture.Extract(svc.Name) },
 			}, nil
-		},
-		logger,
-	)
+		}
+		return gitBuildSpec(ctx, ghClient, projectID, svc, commit)
+	}
+
+	// The base source the builder wraps resolves a Project by id. Without a database
+	// it is just the demo fixture (StaticSource ignores the id, #8). With one, it
+	// resolves a published Owner Project from the DB first and falls back to the
+	// fixture when the id isn't a published Project — so the hand-configured demo
+	// keeps booting even with persistence wired (#19). The play build is pinned to the
+	// published commit, so a Guest never waits on a rebuild.
+	var base runner.ProjectSource = runner.StaticSource{P: fixtureProject}
+	if dbStore != nil {
+		base = runner.FallbackSource{
+			Primary:   project.NewSource(dbStore),
+			Secondary: base,
+		}
+	}
+	source := builder.NewBuildingSource(base, imageBuilder, specFunc, logger)
+
+	// Publishing builds an Owner's DRAFT directly from its manifest (the play-path
+	// source resolves only PUBLISHED Projects, so it cannot build a draft), returning
+	// the built commit to pin. Reuses the same builder + specFunc, so a later play is
+	// a cache hit on the published image. nil builder => publish reports 501.
+	if dbStore != nil {
+		var pb project.ProjectBuilder
+		if ghClient != nil {
+			pb = builderFunc(func(ctx context.Context, _, projectID string, m runcontract.Manifest) (string, error) {
+				if len(m.Services) == 0 {
+					return "", fmt.Errorf("project has no services")
+				}
+				// Services build serially, each capped by the sandbox per-build timeout
+				// (ADR-0010); bound the whole publish accordingly.
+				bctx, cancel := context.WithTimeout(ctx, time.Duration(len(m.Services)+1)*cfg.BuildTimeout)
+				defer cancel()
+				// Resolve the repo's HEAD ONCE and pin every service to it (the handler
+				// enforces a single repo before publishing), so the whole Project builds
+				// at one atomic commit even under a concurrent push — and a later play,
+				// pinned to this same commit, is a cache hit for every service.
+				owner, repo, err := githubapp.ParseRepo(m.Services[0].Repo)
+				if err != nil {
+					return "", err
+				}
+				tok, _, err := ghClient.InstallationToken(bctx, owner, repo)
+				if err != nil {
+					return "", err
+				}
+				sha, err := githubapp.ResolveCommit(bctx, owner, repo, "HEAD", tok)
+				if err != nil {
+					return "", err
+				}
+				draft := runner.StaticSource{P: runner.Project{Manifest: m, Commit: sha}}
+				if _, err := builder.NewBuildingSource(draft, imageBuilder, specFunc, logger).Project(bctx, projectID); err != nil {
+					return "", err
+				}
+				return sha, nil
+			})
+		}
+		projects = project.NewHandlers(dbStore, pb)
+	}
 
 	// The Runner boots Sessions and keeps the proxy registry current; the session
 	// Manager turns a Guest "play" into a live Session asynchronously (#10). The MVP
@@ -258,6 +316,56 @@ func main() {
 	if err := run(ctx, stop, logger, srv, sessions, cfg.Addr(), cfg.Env); err != nil {
 		os.Exit(1)
 	}
+}
+
+// builderFunc adapts a function to project.ProjectBuilder.
+type builderFunc func(ctx context.Context, ownerLogin, projectID string, m runcontract.Manifest) (string, error)
+
+func (f builderFunc) BuildProject(ctx context.Context, ownerLogin, projectID string, m runcontract.Manifest) (string, error) {
+	return f(ctx, ownerLogin, projectID, m)
+}
+
+// gitBuildSpec resolves an Owner service to a BuildSpec backed by a github.com clone
+// (ADR-0008/0010). commit pins the revision (the play path); empty resolves the
+// default-branch HEAD (publish). The installation token is minted lazily — eagerly
+// only to resolve HEAD — so a cache-hit play does no network at all; the Context
+// closure clones at exactly the SHA and strips .git, so the token never reaches the
+// read-only build context.
+func gitBuildSpec(ctx context.Context, gh *githubapp.Client, projectID string, svc runcontract.Service, commit string) (builder.BuildSpec, error) {
+	if gh == nil {
+		return builder.BuildSpec{}, fmt.Errorf("building owner repos is not configured")
+	}
+	owner, repo, err := githubapp.ParseRepo(svc.Repo)
+	if err != nil {
+		return builder.BuildSpec{}, err
+	}
+	sha, resolveTok := commit, ""
+	if sha == "" {
+		tok, _, err := gh.InstallationToken(ctx, owner, repo)
+		if err != nil {
+			return builder.BuildSpec{}, err
+		}
+		resolveTok = tok
+		if sha, err = githubapp.ResolveCommit(ctx, owner, repo, "HEAD", tok); err != nil {
+			return builder.BuildSpec{}, err
+		}
+	}
+	return builder.BuildSpec{
+		ImageName:  "showcase/" + projectID + "-" + svc.Name,
+		Version:    sha,
+		Dockerfile: svc.Dockerfile,
+		Context: func() (string, func(), error) {
+			tok := resolveTok
+			if tok == "" {
+				t, _, err := gh.InstallationToken(ctx, owner, repo)
+				if err != nil {
+					return "", nil, err
+				}
+				tok = t
+			}
+			return githubapp.CloneCommit(ctx, owner, repo, sha, tok)
+		},
+	}, nil
 }
 
 // pruneLoginSessions periodically deletes expired web login sessions until ctx is

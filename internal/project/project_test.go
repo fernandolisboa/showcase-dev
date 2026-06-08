@@ -60,6 +60,17 @@ func (f *fakeStore) ListProjectsByOwner(_ context.Context, ownerID int64) ([]sto
 	return f.byOwner[ownerID], nil
 }
 
+func (f *fakeStore) PublishProject(_ context.Context, ownerID int64, id, commitSHA string) error {
+	for i := range f.byOwner[ownerID] {
+		if f.byOwner[ownerID][i].ID == id {
+			f.byOwner[ownerID][i].Published = true
+			f.byOwner[ownerID][i].CommitSHA = commitSHA
+			return nil
+		}
+	}
+	return store.ErrProjectNotFound
+}
+
 // validForm is a minimal manifest that passes runcontract.Validate: one ui service.
 func validForm() Form {
 	return Form{
@@ -88,7 +99,7 @@ func request(t *testing.T, method, target string, body any, owner store.Owner) *
 
 func TestCreateValid(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs)
+	h := NewHandlers(fs, nil)
 	owner := store.Owner{ID: 1}
 
 	rec := httptest.NewRecorder()
@@ -117,7 +128,7 @@ func TestCreateValid(t *testing.T) {
 }
 
 func TestCreateInvalidManifestIsRejected(t *testing.T) {
-	h := NewHandlers(newFakeStore())
+	h := NewHandlers(newFakeStore(), nil)
 	owner := store.Owner{ID: 1}
 
 	// No ui service → Validate fails ("exactly one ui service is required").
@@ -136,7 +147,7 @@ func TestCreateInvalidManifestIsRejected(t *testing.T) {
 }
 
 func TestCreateMissingNameIsRejected(t *testing.T) {
-	h := NewHandlers(newFakeStore())
+	h := NewHandlers(newFakeStore(), nil)
 	form := validForm()
 	form.Name = "   "
 	rec := httptest.NewRecorder()
@@ -147,7 +158,7 @@ func TestCreateMissingNameIsRejected(t *testing.T) {
 }
 
 func TestCreateUnsupportedEnvSourceIsRejected(t *testing.T) {
-	h := NewHandlers(newFakeStore())
+	h := NewHandlers(newFakeStore(), nil)
 	form := validForm()
 	form.Env = []FormEnv{{Name: "SECRET", Source: "owner"}} // deferred (ADR-0003)
 	rec := httptest.NewRecorder()
@@ -158,7 +169,7 @@ func TestCreateUnsupportedEnvSourceIsRejected(t *testing.T) {
 }
 
 func TestCreateUnknownFieldIsRejected(t *testing.T) {
-	h := NewHandlers(newFakeStore())
+	h := NewHandlers(newFakeStore(), nil)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/owner/projects", strings.NewReader(`{"name":"x","nope":1}`))
 	r = r.WithContext(auth.ContextWithOwner(r.Context(), store.Owner{ID: 1}))
@@ -170,7 +181,7 @@ func TestCreateUnknownFieldIsRejected(t *testing.T) {
 
 func TestCreateDuplicateNameIsConflict(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs)
+	h := NewHandlers(fs, nil)
 	owner := store.Owner{ID: 1}
 
 	first := httptest.NewRecorder()
@@ -186,7 +197,7 @@ func TestCreateDuplicateNameIsConflict(t *testing.T) {
 }
 
 func TestCreateRequiresOwner(t *testing.T) {
-	h := NewHandlers(newFakeStore())
+	h := NewHandlers(newFakeStore(), nil)
 	rec := httptest.NewRecorder()
 	// No owner in context (as if RequireOwner were bypassed).
 	r := httptest.NewRequest(http.MethodPost, "/api/owner/projects", strings.NewReader(`{}`))
@@ -198,7 +209,7 @@ func TestCreateRequiresOwner(t *testing.T) {
 
 func TestListIsOwnerScoped(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs)
+	h := NewHandlers(fs, nil)
 	alice, bob := store.Owner{ID: 1}, store.Owner{ID: 2}
 
 	h.Create(httptest.NewRecorder(), request(t, http.MethodPost, "/api/owner/projects", validForm(), alice))
@@ -224,7 +235,7 @@ func TestListIsOwnerScoped(t *testing.T) {
 
 func TestGetFoundAndCrossOwner(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs)
+	h := NewHandlers(fs, nil)
 	alice, bob := store.Owner{ID: 1}, store.Owner{ID: 2}
 
 	create := httptest.NewRecorder()
@@ -252,10 +263,164 @@ func TestGetFoundAndCrossOwner(t *testing.T) {
 	}
 }
 
+// fakeBuilder is a ProjectBuilder that records whether it ran and returns a fixed
+// commit or error.
+type fakeBuilder struct {
+	commit string
+	err    error
+	called bool
+}
+
+func (f *fakeBuilder) BuildProject(_ context.Context, _, _ string, _ runcontract.Manifest) (string, error) {
+	f.called = true
+	return f.commit, f.err
+}
+
+// createProject is a helper that creates a project via the handler and returns its id.
+func createProject(t *testing.T, h *Handlers, form Form, owner store.Owner) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.Create(rec, request(t, http.MethodPost, "/api/owner/projects", form, owner))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d, body=%s", rec.Code, rec.Body)
+	}
+	var created map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	return created["id"].(string)
+}
+
+func publish(t *testing.T, h *Handlers, id string, owner store.Owner) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := request(t, http.MethodPost, "/api/owner/projects/"+id+"/publish", nil, owner)
+	r.SetPathValue("id", id)
+	h.Publish(rec, r)
+	return rec
+}
+
+func TestPublishSuccess(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "abc123"}
+	h := NewHandlers(fs, fb)
+	owner := store.Owner{ID: 1, GitHubLogin: "me"} // validForm's repo is github.com/me/blog
+	id := createProject(t, h, validForm(), owner)
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish = %d, want 200; body=%s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got["published"] != true || got["commitSha"] != "abc123" {
+		t.Errorf("unexpected publish response: %v", got)
+	}
+	if stored := fs.byOwner[1][0]; !stored.Published || stored.CommitSHA != "abc123" {
+		t.Errorf("project not persisted as published: %+v", stored)
+	}
+}
+
+func TestPublishBuildFailureDoesNotPublish(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, &fakeBuilder{err: errors.New("RUN npm ci failed: exit 1")})
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), owner)
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("build-fail publish = %d, want 422", rec.Code)
+	}
+	if fs.byOwner[1][0].Published {
+		t.Error("a project whose build failed must not be published")
+	}
+}
+
+func TestPublishWithoutBuilderIs501(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil) // no builder configured
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), owner)
+	if rec := publish(t, h, id, owner); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("publish without a builder = %d, want 501", rec.Code)
+	}
+}
+
+func TestPublishRejectsCrossOwnerRepoWithoutBuilding(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "x"}
+	h := NewHandlers(fs, fb)
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	form := validForm()
+	form.Services[0].Repo = "github.com/someoneelse/proj" // not the owner's repo
+	id := createProject(t, h, form, owner)
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("cross-owner repo publish = %d, want 422", rec.Code)
+	}
+	if fb.called {
+		t.Error("must reject a non-owner repo BEFORE attempting a build")
+	}
+}
+
+func TestPublishNotOwnerIs404(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, &fakeBuilder{commit: "x"})
+	alice := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), alice)
+	// Bob tries to publish Alice's project.
+	bob := store.Owner{ID: 2, GitHubLogin: "bob"}
+	if rec := publish(t, h, id, bob); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner publish = %d, want 404", rec.Code)
+	}
+}
+
+func TestPublishRequiresOwner(t *testing.T) {
+	h := NewHandlers(newFakeStore(), &fakeBuilder{})
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/api/owner/projects/x/publish", nil)
+	r.SetPathValue("id", "x")
+	h.Publish(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("publish without an Owner = %d, want 401", rec.Code)
+	}
+}
+
+func TestCheckOwnerRepos(t *testing.T) {
+	man := func(repos ...string) runcontract.Manifest {
+		var m runcontract.Manifest
+		for i, r := range repos {
+			role := runcontract.RoleAPI
+			pfx := "/api"
+			if i == 0 {
+				role, pfx = runcontract.RoleUI, ""
+			}
+			m.Services = append(m.Services, runcontract.Service{Name: fmt.Sprintf("s%d", i), Repo: r, Role: role, PathPrefix: pfx})
+		}
+		return m
+	}
+	if err := checkOwnerRepos("me", man("github.com/me/app")); err != nil {
+		t.Errorf("own single repo should pass: %v", err)
+	}
+	if err := checkOwnerRepos("Me", man("github.com/me/app", "me/app")); err != nil {
+		t.Errorf("own repo, two services one repo (case-insensitive) should pass: %v", err)
+	}
+	if err := checkOwnerRepos("me", man("github.com/someoneelse/app")); err == nil {
+		t.Error("a repo the Owner does not own must be rejected")
+	}
+	if err := checkOwnerRepos("me", man("github.com/me/app", "github.com/me/other")); err == nil {
+		t.Error("multiple repos must be rejected (single-repo MVP)")
+	}
+	if err := checkOwnerRepos("me", man("not a repo")); err == nil {
+		t.Error("an unparseable repo must be rejected")
+	}
+}
+
 func TestGetStoreErrorIs500(t *testing.T) {
 	fs := newFakeStore()
 	fs.failGet = true
-	h := NewHandlers(fs)
+	h := NewHandlers(fs, nil)
 	rec := httptest.NewRecorder()
 	r := request(t, http.MethodGet, "/api/owner/projects/x", nil, store.Owner{ID: 1})
 	r.SetPathValue("id", "x")
