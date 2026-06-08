@@ -33,7 +33,7 @@ var appFS embed.FS
 // The API is a real DB-backed demo (#17): a Seed one-shot (reusing the API image)
 // migrates and seeds the fresh DB before readiness, and each service declares a
 // Healthcheck so the platform gates the Session on it actually serving — the API
-// only reports healthy once it can read the seeded rows back.
+// reports healthy only once it can serve its DB-backed items endpoint.
 func Manifest() runcontract.Manifest {
 	return runcontract.Manifest{
 		Services: []runcontract.Service{
@@ -45,8 +45,9 @@ func Manifest() runcontract.Manifest {
 			},
 			{
 				Name: "api", Repo: "internal/fixture/api", Dockerfile: Dockerfile, Port: 8080, Role: runcontract.RoleAPI, PathPrefix: "/api",
-				// The API's own -health subcommand returns 200 only once it can serve
-				// the seeded rows, so "healthy" means "seeded and working".
+				// The API's own -health subcommand succeeds once it can serve the items
+				// endpoint (server up, migrated schema queryable), so the Session is
+				// gated on the API actually working, not merely started.
 				Healthcheck: []string{"/api", "-health"},
 			},
 		},

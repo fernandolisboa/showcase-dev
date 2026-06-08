@@ -17,6 +17,10 @@ COPY main.go.txt main.go
 RUN CGO_ENABLED=0 go build -trimpath -o /api .
 
 FROM scratch
+# scratch carries no shell, libc, or CA bundle. Docker still injects
+# /etc/resolv.conf at runtime, so the pure-Go resolver finds "db"; and the
+# platform DSN is sslmode=disable, so no CA bundle is needed. (Adding TLS to the
+# DB connection would mean COPYing ca-certificates here.)
 COPY --from=build /api /api
 EXPOSE 8080
 USER 1000:1000

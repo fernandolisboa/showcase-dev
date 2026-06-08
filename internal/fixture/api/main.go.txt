@@ -139,8 +139,13 @@ func serve() error {
 	return http.ListenAndServe(addr, mux)
 }
 
-// health is the readiness probe: it succeeds only once the server can serve the
-// seeded rows, so the platform marks the Session ready only when it truly works.
+// health is the container probe: it succeeds once the server can serve the items
+// endpoint — proving the HTTP server is up and the migrated schema is queryable
+// with the injected creds. It deliberately does NOT assert row contents: the same
+// probe is the ongoing liveness signal (the reaper tears down an unhealthy Stack),
+// so a Guest legitimately emptying the table must not read as a crash. That the
+// seed ran before the Demo is served is guaranteed structurally by the compiled
+// depends_on (the apps wait for the seed to complete), not by this probe.
 func health() int {
 	resp, err := http.Get("http://127.0.0.1:8080/api/items")
 	if err != nil {
