@@ -9,6 +9,11 @@ type ExecutionPlan struct {
 	// Network is the single isolated per-Session bridge. Internal == default-deny
 	// egress (ADR-0007).
 	Network NetworkSpec
+	// EgressNetwork is the optional second, non-internal network added only when a
+	// Project declares an egress allow-list (ADR-0011). It is the one segment with
+	// a route out, joined solely by the egress-proxy sidecar; app services never
+	// join it. Nil keeps the Session sealed default-deny.
+	EgressNetwork *NetworkSpec
 	// Volumes are platform-managed (named) volumes only — never host bind mounts.
 	Volumes []VolumeSpec
 	// Services are the containers in dependency order is expressed via DependsOn.
