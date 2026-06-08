@@ -117,6 +117,21 @@ func TestCallbackRejectsBadState(t *testing.T) {
 	}
 }
 
+func TestCallbackHandlesOAuthError(t *testing.T) {
+	fs := newFakeStore()
+	a := New(fakeProvider{}, fs, false)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?state=ok&error=access_denied", nil)
+	req.AddCookie(&http.Cookie{Name: stateCookie, Value: "ok"})
+	rec := httptest.NewRecorder()
+	a.Callback(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 on OAuth error", rec.Code)
+	}
+	if len(fs.sessions) != 0 {
+		t.Error("a denied authorization must not create a session")
+	}
+}
+
 // signIn drives the full Login→Callback flow and returns the session cookie.
 func signIn(t *testing.T, a *Authenticator) *http.Cookie {
 	t.Helper()

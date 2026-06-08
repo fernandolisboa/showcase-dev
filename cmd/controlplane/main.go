@@ -92,6 +92,13 @@ func main() {
 			logger.Warn("GitHub App credentials not set; Owner sign-in disabled (login returns 501) — see docs/ops/04-register-github-app.md")
 		}
 		authn = auth.New(provider, dbStore, cfg.Env == "prod")
+
+		// Expired login sessions are already rejected at query time, but prune them
+		// so the table doesn't grow unbounded. Runs for the process lifetime,
+		// cancelled at shutdown.
+		pruneCtx, stopPrune := context.WithCancel(context.Background())
+		defer stopPrune()
+		go pruneLoginSessions(pruneCtx, dbStore, logger)
 	}
 
 	// Traefik-facing surface, split across two listeners so a Demo can never reach
@@ -231,6 +238,28 @@ func main() {
 
 	if err := run(ctx, stop, logger, srv, sessions, cfg.Addr(), cfg.Env); err != nil {
 		os.Exit(1)
+	}
+}
+
+// pruneLoginSessions periodically deletes expired web login sessions until ctx is
+// cancelled. Errors are logged, not fatal — a missed prune only delays cleanup,
+// and expired sessions are already rejected at query time.
+func pruneLoginSessions(ctx context.Context, st *store.Store, logger *slog.Logger) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		if n, err := st.DeleteExpiredLoginSessions(ctx); err != nil {
+			if ctx.Err() == nil {
+				logger.Warn("prune expired login sessions", "err", err)
+			}
+		} else if n > 0 {
+			logger.Info("pruned expired login sessions", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 	}
 }
 

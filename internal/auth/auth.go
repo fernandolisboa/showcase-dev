@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -70,12 +71,22 @@ func (a *Authenticator) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// CSRF: the state in the query must match the one we put in the cookie.
+	// Constant-time compare so the opaque state can't be probed via timing.
 	sc, err := r.Cookie(stateCookie)
-	if err != nil || sc.Value == "" || sc.Value != r.URL.Query().Get("state") {
+	if err != nil || sc.Value == "" ||
+		subtle.ConstantTimeCompare([]byte(sc.Value), []byte(r.URL.Query().Get("state"))) != 1 {
 		http.Error(w, "invalid OAuth state", http.StatusBadRequest)
 		return
 	}
 	a.clearCookie(w, stateCookie)
+
+	// GitHub signals a denied/failed authorization via an error parameter (RFC 6749
+	// §4.1.2.1) rather than a code — handle it explicitly instead of falling through
+	// to a generic "missing code".
+	if oauthErr := r.URL.Query().Get("error"); oauthErr != "" {
+		http.Error(w, "github sign-in was denied or failed", http.StatusBadRequest)
+		return
+	}
 
 	code := r.URL.Query().Get("code")
 	if code == "" {
