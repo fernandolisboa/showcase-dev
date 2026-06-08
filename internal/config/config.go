@@ -76,6 +76,23 @@ type Config struct {
 	// LRU-evicting the coldest (ADR-0003). Image storage is cheap; this just bounds
 	// disk growth across many Projects/commits.
 	MaxCachedImages int
+	// BuildSandboxImage is the rootless image builder run per untrusted Owner build
+	// (ADR-0010): a daemonless BuildKit that exports an OCI tar the platform loads.
+	// Defaults to moby/buildkit:rootless.
+	BuildSandboxImage string
+	// BuildNetwork is the dedicated bridge each build joins — internet egress for
+	// dependencies (ADR-0007) but a separate segment with no route to the control
+	// plane or Sessions (ADR-0010). Created on demand.
+	BuildNetwork string
+	// BuildMemoryMB, BuildCPUs and BuildPidsLimit cap a build's resources so a
+	// runaway RUN (fork bomb, memory hog) is bounded (ADR-0010), mirroring the
+	// runtime caps of ADR-0002.
+	BuildMemoryMB  int
+	BuildCPUs      float64
+	BuildPidsLimit int
+	// BuildTimeout is the wall-clock cap per build; on expiry the build container is
+	// force-removed (ADR-0010).
+	BuildTimeout time.Duration
 	// MaxSessions is the global cap on concurrent Sessions (ADR-0006), sized to host
 	// capacity ÷ per-Session budget (ADR-0002). At the cap a play request is
 	// rejected with an "at capacity" response rather than queued. A value <= 0
@@ -107,6 +124,12 @@ func Load() Config {
 		FailureLinger:     getenvDuration("FAILURE_LINGER", 2*time.Minute),
 		MaxCachedImages:   getenvInt("MAX_CACHED_IMAGES", 20),
 		MaxSessions:       getenvInt("MAX_SESSIONS", 10),
+		BuildSandboxImage: getenv("BUILD_SANDBOX_IMAGE", "moby/buildkit:rootless"),
+		BuildNetwork:      getenv("BUILD_NETWORK", "showcase-build"),
+		BuildMemoryMB:     getenvInt("BUILD_MEMORY_MB", 2048),
+		BuildCPUs:         getenvFloat("BUILD_CPUS", 2.0),
+		BuildPidsLimit:    getenvInt("BUILD_PIDS_LIMIT", 2048),
+		BuildTimeout:      getenvDuration("BUILD_TIMEOUT", 5*time.Minute),
 	}
 }
 
@@ -126,6 +149,15 @@ func getenvInt(key string, fallback int) int {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getenvFloat(key string, fallback float64) float64 {
+	if v, ok := os.LookupEnv(key); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
 		}
 	}
 	return fallback

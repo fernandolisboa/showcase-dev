@@ -23,7 +23,7 @@ jobs:
       - run: go build ./cmd/... ./internal/...
 
   integration:
-    name: Runner integration (Docker)
+    name: Runner + session integration (Docker)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,11 +31,31 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
-      # ubuntu-latest ships a running Docker daemon; these tests boot real
-      # containers under runc (gVisor/runsc is verified on the VM, not in CI).
-      # The suite runs serially and now boots a real Traefik (an extra image pull +
-      # readiness wait), so the wall budget is 600s.
+      # ubuntu-latest ships a running Docker daemon; these tests boot real Sessions
+      # under runc and a real Traefik (#27 — an extra image pull + readiness wait);
+      # gVisor/runsc is verified on the VM, not in CI. The serial boots are why the
+      # wall budget is 600s.
       - run: go test -tags integration -timeout 600s ./internal/runner/... ./internal/session/...
+
+  integration-builder:
+    name: Builder sandbox integration (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      # The build sandbox (#31/ADR-0010) runs untrusted builds in rootless BuildKit,
+      # which needs /dev/fuse (present on ubuntu-latest). Its adversarial boundary
+      # tests are the gate #19 depends on, so they run in their own job with their
+      # own 600s budget. Pre-pull the heavy images so that budget is spent on the
+      # cold (cacheless) sandboxed builds, not on image pulls.
+      - run: |
+          for img in moby/buildkit:rootless alpine:3.21 traefik/whoami curlimages/curl:latest postgres:17; do
+            docker pull -q "$img"
+          done
+      - run: go test -tags integration -timeout 600s ./internal/builder/...
 
   web:
     name: Web — lint, test, build

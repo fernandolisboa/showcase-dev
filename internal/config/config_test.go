@@ -59,6 +59,44 @@ func TestMaxCachedImagesParsesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestBuildSandboxTunablesParseAndDefault(t *testing.T) {
+	t.Setenv("BUILD_SANDBOX_IMAGE", "ghcr.io/me/buildkit:pinned")
+	t.Setenv("BUILD_NETWORK", "custom-build-net")
+	t.Setenv("BUILD_MEMORY_MB", "512")
+	t.Setenv("BUILD_CPUS", "1.5")
+	t.Setenv("BUILD_PIDS_LIMIT", "256")
+	t.Setenv("BUILD_TIMEOUT", "90s")
+
+	cfg := Load()
+	if cfg.BuildSandboxImage != "ghcr.io/me/buildkit:pinned" {
+		t.Errorf("BuildSandboxImage = %q", cfg.BuildSandboxImage)
+	}
+	if cfg.BuildNetwork != "custom-build-net" {
+		t.Errorf("BuildNetwork = %q", cfg.BuildNetwork)
+	}
+	if cfg.BuildMemoryMB != 512 {
+		t.Errorf("BuildMemoryMB = %d, want 512", cfg.BuildMemoryMB)
+	}
+	if cfg.BuildCPUs != 1.5 {
+		t.Errorf("BuildCPUs = %v, want 1.5", cfg.BuildCPUs)
+	}
+	if cfg.BuildPidsLimit != 256 {
+		t.Errorf("BuildPidsLimit = %d, want 256", cfg.BuildPidsLimit)
+	}
+	if cfg.BuildTimeout != 90*time.Second {
+		t.Errorf("BuildTimeout = %v, want 90s", cfg.BuildTimeout)
+	}
+}
+
+func TestBuildCPUsFallsBackOnGarbage(t *testing.T) {
+	// A malformed cap must fall back to the default, never 0 — a 0 cap would
+	// silently disable the CPU bound on untrusted builds (ADR-0010 AC2).
+	t.Setenv("BUILD_CPUS", "not-a-float")
+	if got := Load().BuildCPUs; got != 2.0 {
+		t.Errorf("BuildCPUs = %v, want default 2.0 on garbage (the cap must stay on)", got)
+	}
+}
+
 func TestLoadReadsEnv(t *testing.T) {
 	t.Setenv("HOST", "127.0.0.1")
 	t.Setenv("PORT", "9090")

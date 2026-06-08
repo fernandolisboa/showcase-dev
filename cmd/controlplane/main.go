@@ -89,8 +89,17 @@ func main() {
 	// The builder builds the Project's image(s) from source and caches them
 	// (ADR-0003); the BuildingSource swaps the built tags into the Project the
 	// Runner boots, replacing prebuilt refs. The MVP builds one in-repo fixture from
-	// its embedded Dockerfile; #19 will resolve real Owner repos via SpecFunc.
-	imageBuilder := builder.New(cfg.MaxCachedImages, logger)
+	// its embedded Dockerfile; #19 will resolve real Owner repos via SpecFunc. Every
+	// build runs in a hardened, throwaway rootless-BuildKit sandbox (ADR-0010), so an
+	// untrusted Owner's RUN steps never execute on the control-plane host.
+	imageBuilder := builder.New(cfg.MaxCachedImages, logger, builder.WithSandbox(builder.Sandbox{
+		Image:     cfg.BuildSandboxImage,
+		Network:   cfg.BuildNetwork,
+		MemoryMB:  cfg.BuildMemoryMB,
+		CPUs:      cfg.BuildCPUs,
+		PidsLimit: cfg.BuildPidsLimit,
+		Timeout:   cfg.BuildTimeout,
+	}))
 	fixtureProject := runner.Project{Manifest: fixture.Manifest(), Images: map[string]string{}}
 	source := builder.NewBuildingSource(
 		runner.StaticSource{P: fixtureProject}, imageBuilder,

@@ -1,8 +1,9 @@
 //go:build integration
 
-// Seam tests for #14/#15/#16/#17: they run a real `docker build` of the embedded
-// fixture and boot the multi-service Stack through the Runner. Require Docker.
-// Run with
+// Seam tests for #14/#15/#16/#17: they build the embedded fixture from source in
+// the sandbox (ADR-0010) and boot the multi-service Stack through the Runner —
+// proving real, multi-stage builds still work end to end through the sandbox.
+// Require Docker. Run with
 //
 //	go test -tags integration ./internal/builder/...
 package builder
@@ -33,9 +34,7 @@ import (
 // Traefik is unit-tested in internal/proxy; the Traefik-in-the-loop e2e remains a
 // noted follow-up.)
 func TestBuildMultiServiceFromSourceThenBoot(t *testing.T) {
-	if err := exec.Command("docker", "version").Run(); err != nil {
-		t.Skip("docker not available; skipping builder integration test")
-	}
+	requireDocker(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -103,9 +102,7 @@ func TestBuildMultiServiceFromSourceThenBoot(t *testing.T) {
 // isolation. It boots two Sessions from the same built images, writes to one with
 // that Session's own injected creds, and shows the other never sees the write.
 func TestPerSessionSeedDataIsolated(t *testing.T) {
-	if err := exec.Command("docker", "version").Run(); err != nil {
-		t.Skip("docker not available; skipping isolation integration test")
-	}
+	requireDocker(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
@@ -162,15 +159,13 @@ func TestPerSessionSeedDataIsolated(t *testing.T) {
 }
 
 // TestBuildHasEgress pins ADR-0007's other half: build-time egress stays
-// PERMITTED. Unlike the sealed runtime Stack (internal network, default-deny),
-// builds run on the default bridge with internet access to fetch dependencies. It
-// builds a tiny image whose RUN step needs the network (apk fetches a package); if
-// a future build-sandbox change cut egress, this build — and real Owner builds —
-// would fail.
+// PERMITTED. Unlike the sealed runtime Stack (internal network, default-deny), the
+// sandboxed build runs on a dedicated egress-enabled build network (ADR-0010) so
+// it can fetch dependencies. It builds a tiny image whose RUN step needs the
+// network (apk fetches a package); if the build sandbox cut egress, this build —
+// and real Owner builds — would fail.
 func TestBuildHasEgress(t *testing.T) {
-	if err := exec.Command("docker", "version").Run(); err != nil {
-		t.Skip("docker not available; skipping build-egress test")
-	}
+	requireDocker(t)
 
 	dir := t.TempDir()
 	const dockerfile = "Dockerfile"

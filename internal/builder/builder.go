@@ -4,11 +4,17 @@
 // when the version changes, and LRU-evicted when the cache outgrows its cap.
 // Guests never wait on a build — the control plane warms the cache at startup.
 //
-// Build isolation is deferred: `docker build` runs the Dockerfile's RUN steps on
-// the host, so this is safe only while the single Project is the trusted in-repo
-// fixture. Sandboxing untrusted Owner builds (rootless/BuildKit, egress policy,
-// resource caps) must land before #19 wires real Owner repos — tracked as a
-// follow-up.
+// Untrusted Owner builds are sandboxed (ADR-0010): rather than running
+// `docker build` on the host daemon — whose RUN steps would execute on the
+// control-plane host — each build runs in a throwaway, rootless BuildKit
+// container with no Docker socket, no host mounts but the read-only context,
+// resource caps, a wall-clock timeout, and a dedicated egress-only build network
+// with no route to the control plane or Sessions. The result is exported as an
+// OCI tar and loaded into the local image store, so the cache contract and the
+// Runner are unchanged (see sandbox.go). ADR-0010 names the trust threshold:
+// this pragmatic isolation suffices for #19's trusted-ish Owners; prod-grade
+// isolation (gVisor-wrapped builds / a dedicated build VM, ADR-0009) is a
+// required gate before builds open to anonymous Owners.
 package builder
 
 import (
@@ -16,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"path/filepath"
 	"sync"
 )
 
@@ -36,11 +41,20 @@ type BuildSpec struct {
 }
 
 // runFunc runs docker and returns its combined output — injectable for tests.
+// It carries the host-side image operations (load, image rm); the sandboxed
+// build itself goes through buildFunc.
 type runFunc func(ctx context.Context, args ...string) ([]byte, error)
 
 func dockerRun(ctx context.Context, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 }
+
+// buildFunc builds the image tagged tag from the Dockerfile at dockerfileRel
+// (relative to contextDir) inside an isolated sandbox and loads the result into
+// the local image store. It returns the builder's log output for error context.
+// Injectable so unit tests exercise cache/invalidation/eviction without a real
+// sandbox; production is Builder.sandboxBuild (sandbox.go).
+type buildFunc func(ctx context.Context, tag, contextDir, dockerfileRel string) ([]byte, error)
 
 // entry is a cached build: the source version it was built from, its image tag,
 // and a recency counter for LRU eviction.
@@ -54,28 +68,49 @@ type entry struct {
 // serialized (the cache cap is small and warming happens at startup, so this is
 // simpler than per-key build dedup and avoids two builds racing one image name).
 type Builder struct {
-	run    runFunc
-	max    int
-	logger *slog.Logger
+	run     runFunc
+	build   buildFunc
+	sandbox Sandbox
+	max     int
+	logger  *slog.Logger
 
-	mu    sync.Mutex
-	cache map[string]entry // keyed by ImageName
-	tick  uint64
+	mu       sync.Mutex
+	cache    map[string]entry // keyed by ImageName
+	tick     uint64
+	netReady bool // the build network has been ensured (memoised under mu)
+}
+
+// Option configures a Builder.
+type Option func(*Builder)
+
+// WithSandbox overrides the build-sandbox configuration (ADR-0010). Unset fields
+// fall back to defaults; see Sandbox and defaultSandbox.
+func WithSandbox(s Sandbox) Option {
+	return func(b *Builder) { b.sandbox = s.withDefaults() }
 }
 
 // New builds a Builder that keeps at most max cached images (<= 0 means 1).
-func New(max int, logger *slog.Logger) *Builder {
+// Without options it sandboxes builds with the default rootless-BuildKit config.
+func New(max int, logger *slog.Logger, opts ...Option) *Builder {
 	if max < 1 {
 		max = 1
 	}
-	return &Builder{run: dockerRun, max: max, logger: logger, cache: map[string]entry{}}
+	b := &Builder{run: dockerRun, max: max, logger: logger, cache: map[string]entry{}, sandbox: defaultSandbox()}
+	for _, opt := range opts {
+		opt(b)
+	}
+	// Default build backend reads b.sandbox at call time, so WithSandbox above
+	// (and any test override of b.build) takes effect.
+	b.build = b.sandboxBuild
+	return b
 }
 
 // Build returns the image tag for spec, building from source on a cache miss.
 // On a hit (same version already built) it returns the cached tag without
 // touching docker or the filesystem. A version change rebuilds and removes the
 // previous image; exceeding the cap LRU-evicts the coldest image. A build failure
-// returns an error carrying docker's output (surfaced to the Owner by the caller).
+// returns an error carrying the builder's output (surfaced to the Owner by the
+// caller).
 func (b *Builder) Build(ctx context.Context, spec BuildSpec) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -94,9 +129,8 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec) (string, error) {
 	defer cleanup()
 
 	tag := spec.ImageName + ":" + shortVersion(spec.Version)
-	dockerfile := filepath.Join(dir, spec.Dockerfile)
-	if out, err := b.run(ctx, "build", "-t", tag, "-f", dockerfile, dir); err != nil {
-		return "", fmt.Errorf("docker build %s: %w\n%s", tag, err, out)
+	if out, err := b.build(ctx, tag, dir, spec.Dockerfile); err != nil {
+		return "", fmt.Errorf("build %s: %w\n%s", tag, err, out)
 	}
 
 	// A new version supersedes the old image for this name — remove it (ADR-0003:

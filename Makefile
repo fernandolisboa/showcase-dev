@@ -17,8 +17,8 @@ go-build: ## Build the control-plane binary (embeds current internal/web/dist)
 	go build -o $(BIN) ./cmd/controlplane
 go-test: ## Run Go unit tests
 	go test -race $(GO_PKGS)
-integration: ## Run Seam-2 integration tests (requires Docker)
-	go test -tags integration -timeout 300s $(GO_PKGS)
+integration: ## Run integration tests (requires Docker; builder tests need rootless BuildKit)
+	go test -tags integration -timeout 600s $(GO_PKGS)
 go-lint: ## Vet Go (plus golangci-lint if installed)
 	go vet $(GO_PKGS)
 	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run $(GO_PKGS) || echo "golangci-lint not installed; ran go vet only"
