@@ -19,31 +19,28 @@ type fakeDocker struct {
 	failOn  string   // if a build tag contains this, the build fails
 }
 
+// run stands in for the host-side docker ops the builder still makes directly —
+// image rm (invalidation/eviction). The sandboxed build goes through build below.
 func (f *fakeDocker) run(_ context.Context, args ...string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	switch {
-	case len(args) > 0 && args[0] == "build":
-		tag := flagValue(args, "-t")
-		if f.failOn != "" && strings.Contains(tag, f.failOn) {
-			return []byte("step 3/5: RUN false\nbuild failed"), errors.New("exit status 1")
-		}
-		f.builds = append(f.builds, tag)
-		return []byte("built " + tag), nil
-	case len(args) >= 2 && args[0] == "image" && args[1] == "rm":
+	if len(args) >= 2 && args[0] == "image" && args[1] == "rm" {
 		f.removed = append(f.removed, args[len(args)-1])
-		return nil, nil
 	}
 	return nil, nil
 }
 
-func flagValue(args []string, flag string) string {
-	for i, a := range args {
-		if a == flag && i+1 < len(args) {
-			return args[i+1]
-		}
+// build stands in for the sandboxed build backend: it records the built tag and
+// fails when the tag matches failOn, so cache/invalidation/eviction are testable
+// without a real BuildKit sandbox.
+func (f *fakeDocker) build(_ context.Context, tag, _, _ string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failOn != "" && strings.Contains(tag, f.failOn) {
+		return []byte("step 3/5: RUN false\nbuild failed"), errors.New("exit status 1")
 	}
-	return ""
+	f.builds = append(f.builds, tag)
+	return []byte("built " + tag), nil
 }
 
 // ctxProvider returns a Context func that records how many times it was invoked
@@ -61,6 +58,7 @@ const t_tempdir = "/tmp/ignored-by-fake"
 func newTestBuilder(d *fakeDocker, max int) *Builder {
 	b := New(max, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b.run = d.run
+	b.build = d.build
 	return b
 }
 
