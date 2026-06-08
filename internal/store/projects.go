@@ -87,6 +87,30 @@ FROM projects WHERE id = $1 AND owner_id = $2`
 	return p, nil
 }
 
+// GetPublishedProject looks up a published Project by id for the play path: a Guest
+// plays by id, and only a published Project (one that built successfully — the flag
+// is flipped at publish, a later slice) may boot. An unpublished or missing id — and
+// any id that isn't a uuid — is ErrProjectNotFound, so a draft is never playable and
+// a FallbackSource cleanly defers to the demo fixture.
+func (s *Store) GetPublishedProject(ctx context.Context, id string) (Project, error) {
+	if !uuidRE.MatchString(id) {
+		return Project{}, ErrProjectNotFound
+	}
+	const q = `
+SELECT id, owner_id, name, manifest, published, created_at, updated_at
+FROM projects WHERE id = $1 AND published`
+	var p Project
+	err := s.pool.QueryRow(ctx, q, id).
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Project{}, ErrProjectNotFound
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("get published project: %w", err)
+	}
+	return p, nil
+}
+
 // ListProjectsByOwner returns an Owner's Projects, newest first.
 func (s *Store) ListProjectsByOwner(ctx context.Context, ownerID int64) ([]Project, error) {
 	const q = `

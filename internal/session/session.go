@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -181,11 +182,31 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 }
 
-// PlayHandler is the spin-up API: it starts a Session for the configured Project
-// and returns it as JSON. Anonymous — no account required (ADR-0008). Mount it
-// under "POST /api/play" so the method is enforced by the router.
-func PlayHandler(m *Manager, projectID string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// PlayHandler is the spin-up API: it starts a Session and returns it as JSON.
+// Anonymous — no account required (ADR-0008). The Project to play comes from an
+// optional JSON body {"projectId":"..."}; an empty or absent body falls back to
+// defaultProjectID (the demo fixture), so the existing demo button keeps working
+// with no body while a Portfolio sends an explicit id. Mount under "POST /api/play"
+// so the method is enforced by the router.
+func PlayHandler(m *Manager, defaultProjectID string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		projectID := defaultProjectID
+		var body struct {
+			ProjectID string `json:"projectId"`
+		}
+		// The demo button POSTs no body, which decodes to io.EOF — treat that (and an
+		// explicit empty id) as "use the default". Only a genuinely malformed or
+		// oversized body is a 400; an unknown/unpublished id is handled downstream
+		// (the boot fails to a "failed to start" page, #13), not here.
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if body.ProjectID != "" {
+			projectID = body.ProjectID
+		}
+
 		sess, err := m.Play(projectID)
 		if err != nil {
 			// Free hardening on a guest-facing surface: never let a browser sniff a

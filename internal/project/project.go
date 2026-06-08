@@ -5,7 +5,7 @@
 // field names and so this layer decides which manifest features an Owner may set.
 // It persists through a narrow subset of *store.Store (the Store interface), so the
 // handlers are testable without a database. Resolving a stored Project for the
-// Runner (the play path) lives in a sibling file added with the build slice.
+// Runner to play (the play path) is the Source in source.go.
 package project
 
 import (

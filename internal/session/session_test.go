@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,6 +155,101 @@ func TestPlayHandlerServesJSON(t *testing.T) {
 	}
 	if sess.ID == "" || sess.URL == "" {
 		t.Errorf("incomplete session: %+v", sess)
+	}
+}
+
+// capturingRunner records the projectID each boot is provisioned with, so a test
+// can assert which Project a PlayHandler request routed to.
+type capturingRunner struct{ projects chan string }
+
+func (c *capturingRunner) Provision(_ context.Context, projectID, sessionID string) (string, error) {
+	c.projects <- projectID
+	return "http://" + sessionID, nil
+}
+func (c *capturingRunner) Teardown(context.Context, string) error { return nil }
+
+// With no body (the demo button), PlayHandler plays the default Project.
+func TestPlayHandlerDefaultsProjectIDWhenBodyEmpty(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	runner := &capturingRunner{projects: make(chan string, 1)}
+	m := newTestManager(runner, reg)
+
+	rec := httptest.NewRecorder()
+	PlayHandler(m, "fixture").ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/play", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	select {
+	case got := <-runner.projects:
+		if got != "fixture" {
+			t.Errorf("provisioned project %q, want the default %q", got, "fixture")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Provision was not called")
+	}
+}
+
+// A body's projectId selects which Project to play (the Portfolio path).
+func TestPlayHandlerUsesProjectIDFromBody(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	runner := &capturingRunner{projects: make(chan string, 1)}
+	m := newTestManager(runner, reg)
+
+	const id = "11111111-2222-3333-4444-555555555555"
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/play", strings.NewReader(`{"projectId":"`+id+`"}`))
+	PlayHandler(m, "fixture").ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	select {
+	case got := <-runner.projects:
+		if got != id {
+			t.Errorf("provisioned project %q, want the body's id %q", got, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Provision was not called")
+	}
+}
+
+// A malformed (non-empty) body is a 400 and must not start a boot.
+func TestPlayHandlerRejectsMalformedBody(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	runner := &capturingRunner{projects: make(chan string, 1)}
+	m := newTestManager(runner, reg)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/play", strings.NewReader(`{"projectId":`)) // truncated JSON
+	PlayHandler(m, "fixture").ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a malformed body", rec.Code)
+	}
+	select {
+	case got := <-runner.projects:
+		t.Errorf("malformed body still provisioned project %q", got)
+	case <-time.After(200 * time.Millisecond):
+		// good — no boot started
+	}
+}
+
+// An oversized body trips the MaxBytesReader limit (a *http.MaxBytesError, not
+// io.EOF): a 400 that starts no boot — guarding the guest-facing 1 KiB cap.
+func TestPlayHandlerRejectsOversizedBody(t *testing.T) {
+	reg := proxy.NewRegistry("demo.app")
+	runner := &capturingRunner{projects: make(chan string, 1)}
+	m := newTestManager(runner, reg)
+
+	rec := httptest.NewRecorder()
+	huge := `{"projectId":"` + strings.Repeat("A", 2000) + `"}` // > 1<<10
+	PlayHandler(m, "fixture").ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/play", strings.NewReader(huge)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an oversized body", rec.Code)
+	}
+	select {
+	case got := <-runner.projects:
+		t.Errorf("oversized body still provisioned project %q", got)
+	case <-time.After(200 * time.Millisecond):
+		// good — no boot started
 	}
 }
 

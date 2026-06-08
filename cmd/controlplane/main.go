@@ -165,8 +165,21 @@ func main() {
 		Timeout:   cfg.BuildTimeout,
 	}))
 	fixtureProject := runner.Project{Manifest: fixture.Manifest(), Images: map[string]string{}}
+	// The base source the builder wraps resolves a Project by id. Without a database
+	// it is just the demo fixture (StaticSource ignores the id, #8). With one, it
+	// resolves a published Owner Project from the DB first and falls back to the
+	// fixture when the id isn't a published Project — so the hand-configured demo
+	// keeps booting even with persistence wired and nothing published yet (#19; build
+	// at publish makes Owner Projects bootable in a later slice).
+	var base runner.ProjectSource = runner.StaticSource{P: fixtureProject}
+	if dbStore != nil {
+		base = runner.FallbackSource{
+			Primary:   project.NewSource(dbStore),
+			Secondary: base,
+		}
+	}
 	source := builder.NewBuildingSource(
-		runner.StaticSource{P: fixtureProject}, imageBuilder,
+		base, imageBuilder,
 		func(projectID string, svc runcontract.Service) (builder.BuildSpec, error) {
 			version, err := fixture.Version(svc.Name)
 			if err != nil {

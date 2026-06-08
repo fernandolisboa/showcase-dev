@@ -200,6 +200,23 @@ func TestProjectRoundTripAndOwnership(t *testing.T) {
 		t.Errorf("GetOwnerProject(non-uuid) = %v, want ErrProjectNotFound", err)
 	}
 
+	// The play path only resolves PUBLISHED Projects. Alice's "blog" is an unpublished
+	// draft, so a Guest cannot play it yet; once published it resolves by id; a
+	// non-uuid id is not-found (so the FallbackSource defers to the fixture).
+	if _, err := s.GetPublishedProject(ctx, p.ID); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetPublishedProject(draft) = %v, want ErrProjectNotFound", err)
+	}
+	if _, err := s.pool.Exec(ctx, "UPDATE projects SET published = true WHERE id = $1", p.ID); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	pub, err := s.GetPublishedProject(ctx, p.ID)
+	if err != nil || pub.ID != p.ID || !pub.Published {
+		t.Fatalf("GetPublishedProject(published) = (%+v, %v), want the published project", pub, err)
+	}
+	if _, err := s.GetPublishedProject(ctx, "fixture"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetPublishedProject(non-uuid) = %v, want ErrProjectNotFound", err)
+	}
+
 	// FK cascade: deleting the Owner removes their Projects.
 	if _, err := s.pool.Exec(ctx, "DELETE FROM owners WHERE id = $1", alice.ID); err != nil {
 		t.Fatalf("delete owner: %v", err)
