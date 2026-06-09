@@ -79,6 +79,39 @@ func (f *fakeStore) ListPublishedProjectsByUsername(_ context.Context, username 
 	return pub, nil
 }
 
+func (f *fakeStore) SetProjectSlug(_ context.Context, ownerID int64, id, slug string) error {
+	if slug != "" { // per-owner unique slug
+		for _, p := range f.byOwner[ownerID] {
+			if p.Slug == slug && p.ID != id {
+				return store.ErrProjectSlugTaken
+			}
+		}
+	}
+	for i := range f.byOwner[ownerID] {
+		if f.byOwner[ownerID][i].ID == id {
+			f.byOwner[ownerID][i].Slug = slug
+			return nil
+		}
+	}
+	return store.ErrProjectNotFound
+}
+
+func (f *fakeStore) GetPublishedProjectBySlug(_ context.Context, username, slug string) (store.Project, error) {
+	if slug == "" {
+		return store.Project{}, store.ErrProjectNotFound
+	}
+	o, ok := f.owners[username]
+	if !ok {
+		return store.Project{}, store.ErrProjectNotFound
+	}
+	for _, p := range f.byOwner[o.ID] {
+		if p.Published && p.Slug == slug {
+			return p, nil
+		}
+	}
+	return store.Project{}, store.ErrProjectNotFound
+}
+
 func (f *fakeStore) CreateProject(_ context.Context, ownerID int64, name string, manifest []byte) (store.Project, error) {
 	for _, p := range f.byOwner[ownerID] {
 		if p.Name == name {
@@ -795,6 +828,154 @@ func TestUpdateRequiresOwner(t *testing.T) {
 	h.Update(rec, r)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("update without an Owner = %d, want 401", rec.Code)
+	}
+}
+
+func setSlug(t *testing.T, h *Handlers, id, slug string, owner store.Owner) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := request(t, http.MethodPut, "/api/owner/projects/"+id+"/slug", map[string]string{"slug": slug}, owner)
+	r.SetPathValue("id", id)
+	h.SetSlug(rec, r)
+	return rec
+}
+
+func TestSetSlugValidAndEcho(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	id := createProject(t, h, validForm(), owner)
+
+	rec := setSlug(t, h, id, "My-App", owner) // canonicalized to "my-app"
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set slug = %d, body=%s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got["slug"] != "my-app" {
+		t.Errorf("echoed slug = %v, want my-app", got["slug"])
+	}
+	if fs.byOwner[1][0].Slug != "my-app" {
+		t.Errorf("slug not persisted: %+v", fs.byOwner[1][0])
+	}
+}
+
+func TestSetSlugInvalidIs400(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	id := createProject(t, h, validForm(), owner)
+	for _, bad := range []string{"bad slug", "edit", "-x"} {
+		if rec := setSlug(t, h, id, bad, owner); rec.Code != http.StatusBadRequest {
+			t.Errorf("set slug %q = %d, want 400", bad, rec.Code)
+		}
+	}
+}
+
+func TestSetSlugTakenIs409(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	id1 := createProject(t, h, validForm(), owner)
+	other := validForm()
+	other.Name = "other"
+	id2 := createProject(t, h, other, owner)
+
+	if rec := setSlug(t, h, id1, "app", owner); rec.Code != http.StatusOK {
+		t.Fatalf("first set slug = %d", rec.Code)
+	}
+	if rec := setSlug(t, h, id2, "app", owner); rec.Code != http.StatusConflict {
+		t.Fatalf("duplicate slug = %d, want 409", rec.Code)
+	}
+}
+
+func TestSetSlugClear(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	id := createProject(t, h, validForm(), owner)
+	setSlug(t, h, id, "app", owner)
+
+	rec := setSlug(t, h, id, "", owner) // empty clears it
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear slug = %d, body=%s", rec.Code, rec.Body)
+	}
+	if fs.byOwner[1][0].Slug != "" {
+		t.Errorf("slug not cleared: %q", fs.byOwner[1][0].Slug)
+	}
+}
+
+func TestSetSlugCrossOwnerIs404(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	alice, bob := store.Owner{ID: 1}, store.Owner{ID: 2}
+	id := createProject(t, h, validForm(), alice)
+	if rec := setSlug(t, h, id, "app", bob); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner set slug = %d, want 404", rec.Code)
+	}
+}
+
+func TestSetSlugRequiresOwner(t *testing.T) {
+	h := NewHandlers(newFakeStore(), nil)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPut, "/api/owner/projects/x/slug", strings.NewReader(`{"slug":"a"}`))
+	r.SetPathValue("id", "x")
+	h.SetSlug(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("set slug without an Owner = %d, want 401", rec.Code)
+	}
+}
+
+func projectBySlug(t *testing.T, h *Handlers, username, slug string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/api/portfolio/"+username+"/"+slug, nil)
+	r.SetPathValue("username", username)
+	r.SetPathValue("slug", slug)
+	h.ProjectBySlug(rec, r)
+	return rec
+}
+
+func TestProjectBySlugResolvesPublished(t *testing.T) {
+	fs := newFakeStore()
+	h, pub := newPublishHandlers(fs, &fakeBuilder{commit: "c"})
+	alice := store.Owner{ID: 1, Username: "alice", GitHubLogin: "me"}
+	fs.owners["alice"] = alice
+	id := createProject(t, h, validForm(), alice)
+	publishAndSettle(t, h, pub, id, alice)
+	if rec := setSlug(t, h, id, "app", alice); rec.Code != http.StatusOK {
+		t.Fatalf("set slug = %d", rec.Code)
+	}
+
+	rec := projectBySlug(t, h, "Alice", "App") // case-insensitive
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve by slug = %d, body=%s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got["id"] != id || got["name"] != "blog" || got["slug"] != "app" {
+		t.Errorf("unexpected resolve response: %v", got)
+	}
+}
+
+func TestProjectBySlugUnknownIs404(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	fs.owners["alice"] = store.Owner{ID: 1, Username: "alice"}
+	if rec := projectBySlug(t, h, "alice", "nope"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown slug = %d, want 404", rec.Code)
+	}
+}
+
+func TestProjectBySlugDraftIs404(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	alice := store.Owner{ID: 1, Username: "alice"}
+	fs.owners["alice"] = alice
+	id := createProject(t, h, validForm(), alice) // draft, never published
+	setSlug(t, h, id, "app", alice)
+	if rec := projectBySlug(t, h, "alice", "app"); rec.Code != http.StatusNotFound {
+		t.Fatalf("draft resolve = %d, want 404 (a draft is not playable)", rec.Code)
 	}
 }
 

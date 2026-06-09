@@ -33,6 +33,10 @@ var ErrProjectNameTaken = errors.New("store: project name already taken")
 // rather than starting a second concurrent build of the same Project (#49).
 var ErrBuildInProgress = errors.New("store: a build is already in progress")
 
+// ErrProjectSlugTaken is returned when an Owner already has a Project with the requested
+// slug (the per-owner UNIQUE on slug, #51), mapped from 23505 on SetProjectSlug.
+var ErrProjectSlugTaken = errors.New("store: project slug already taken")
+
 // Project is a persisted Owner app (#19). Manifest is the Owner's run contract
 // (ADR-0003) stored verbatim as jsonb; this layer keeps it opaque ([]byte) so the
 // store stays domain-agnostic — the runner adapter unmarshals it into a
@@ -61,8 +65,11 @@ type Project struct {
 	// Project (whose services fall back to CommitSHA). Kept opaque ([]byte) like Manifest
 	// so the store stays domain-agnostic; the play adapter unmarshals it.
 	ServiceCommits []byte
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Slug is the optional human-friendly per-Owner URL segment for showcase.dev/{username}
+	// /{slug} (#51); empty if the Owner has not set one (the UUID still plays).
+	Slug      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // CreateProject inserts a new Project for an Owner. manifest must already be a
@@ -73,10 +80,10 @@ func (s *Store) CreateProject(ctx context.Context, ownerID int64, name string, m
 	const q = `
 INSERT INTO projects (owner_id, name, manifest)
 VALUES ($1, $2, $3)
-RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, created_at, updated_at`
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, COALESCE(slug, '') AS slug, created_at, updated_at`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, ownerID, name, manifest).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 		return Project{}, ErrProjectNameTaken
@@ -95,11 +102,11 @@ func (s *Store) GetOwnerProject(ctx context.Context, ownerID int64, id string) (
 		return Project{}, ErrProjectNotFound
 	}
 	const q = `
-SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, COALESCE(slug, '') AS slug, created_at, updated_at
 FROM projects WHERE id = $1 AND owner_id = $2`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id, ownerID).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
 	}
@@ -119,11 +126,11 @@ func (s *Store) GetPublishedProject(ctx context.Context, id string) (Project, er
 		return Project{}, ErrProjectNotFound
 	}
 	const q = `
-SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, COALESCE(slug, '') AS slug, created_at, updated_at
 FROM projects WHERE id = $1 AND published`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
 	}
@@ -133,10 +140,59 @@ FROM projects WHERE id = $1 AND published`
 	return p, nil
 }
 
+// GetPublishedProjectBySlug resolves a published Project by the Owner's username and the
+// Project's slug — the public play path for showcase.dev/{username}/{slug} (#51). Only a
+// published Project resolves; an unknown username/slug, an unpublished one, or an empty
+// slug is ErrProjectNotFound (so a Guest can't reach a draft and the caller can 404).
+func (s *Store) GetPublishedProjectBySlug(ctx context.Context, username, slug string) (Project, error) {
+	if slug == "" {
+		return Project{}, ErrProjectNotFound
+	}
+	const q = `
+SELECT p.id, p.owner_id, p.name, p.manifest, p.published, COALESCE(p.commit_sha, '') AS commit_sha, p.build_state, COALESCE(p.build_error, '') AS build_error, p.service_commits, COALESCE(p.slug, '') AS slug, p.created_at, p.updated_at
+FROM projects p JOIN owners o ON o.id = p.owner_id
+WHERE o.username = $1 AND p.slug = $2 AND p.published`
+	var p Project
+	err := s.pool.QueryRow(ctx, q, username, slug).
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Project{}, ErrProjectNotFound
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("get published project by slug: %w", err)
+	}
+	return p, nil
+}
+
+// SetProjectSlug sets — or, with an empty slug, clears — one of an Owner's Projects' URL
+// slug (#51); the slug is editable. It does NOT touch publish state (a slug is a URL alias,
+// not build config). Owner-scoped: a cross-owner or missing id affects no row and returns
+// ErrProjectNotFound; a slug another of the Owner's Projects already uses is
+// ErrProjectSlugTaken (the per-owner UNIQUE). slug must already be canonical (the project
+// layer validates it); empty clears it back to NULL.
+func (s *Store) SetProjectSlug(ctx context.Context, ownerID int64, id, slug string) error {
+	if !uuidRE.MatchString(id) {
+		return ErrProjectNotFound
+	}
+	const q = `UPDATE projects SET slug = NULLIF($3, ''), updated_at = now() WHERE id = $1 AND owner_id = $2`
+	tag, err := s.pool.Exec(ctx, q, id, ownerID, slug)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on (owner_id, slug)
+		return ErrProjectSlugTaken
+	}
+	if err != nil {
+		return fmt.Errorf("set project slug: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
+}
+
 // ListProjectsByOwner returns an Owner's Projects, newest first.
 func (s *Store) ListProjectsByOwner(ctx context.Context, ownerID int64) ([]Project, error) {
 	const q = `
-SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, COALESCE(slug, '') AS slug, created_at, updated_at
 FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 	rows, err := s.pool.Query(ctx, q, ownerID)
 	if err != nil {
@@ -152,7 +208,7 @@ FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 // "Owner with nothing published".
 func (s *Store) ListPublishedProjectsByUsername(ctx context.Context, username string) ([]Project, error) {
 	const q = `
-SELECT p.id, p.owner_id, p.name, p.manifest, p.published, COALESCE(p.commit_sha, '') AS commit_sha, p.build_state, COALESCE(p.build_error, '') AS build_error, p.service_commits, p.created_at, p.updated_at
+SELECT p.id, p.owner_id, p.name, p.manifest, p.published, COALESCE(p.commit_sha, '') AS commit_sha, p.build_state, COALESCE(p.build_error, '') AS build_error, p.service_commits, COALESCE(p.slug, '') AS slug, p.created_at, p.updated_at
 FROM projects p JOIN owners o ON o.id = p.owner_id
 WHERE o.username = $1 AND p.published
 ORDER BY p.created_at DESC`
@@ -169,7 +225,7 @@ func scanProjects(rows pgx.Rows) ([]Project, error) {
 	var ps []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		ps = append(ps, p)
@@ -234,10 +290,10 @@ SET name = $3,
     build_error = CASE WHEN manifest IS DISTINCT FROM $4 THEN NULL ELSE build_error END,
     updated_at = now()
 WHERE id = $1 AND owner_id = $2
-RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, created_at, updated_at`
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, COALESCE(slug, '') AS slug, created_at, updated_at`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id, ownerID, name, manifest).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 		return Project{}, ErrProjectNameTaken
@@ -296,10 +352,10 @@ func (s *Store) StartBuild(ctx context.Context, ownerID int64, id string) (Proje
 UPDATE projects
 SET build_state = 'building', build_error = NULL, build_started_at = now(), updated_at = now()
 WHERE id = $1 AND owner_id = $2 AND build_state <> 'building'
-RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, created_at, updated_at`
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, service_commits, COALESCE(slug, '') AS slug, created_at, updated_at`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id, ownerID).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.ServiceCommits, &p.Slug, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// No row updated: either the Project isn't the Owner's (or is gone), or it is
 		// already 'building'. Disambiguate so the caller can return 404 vs 409.

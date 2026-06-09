@@ -90,6 +90,10 @@ func (noopProjectStore) PublishProject(context.Context, int64, string, string, [
 func (noopProjectStore) ReclaimStuckBuilds(context.Context, time.Duration, time.Duration) (int64, error) {
 	return 0, nil
 }
+func (noopProjectStore) SetProjectSlug(context.Context, int64, string, string) error { return nil }
+func (noopProjectStore) GetPublishedProjectBySlug(context.Context, string, string) (store.Project, error) {
+	return store.Project{}, store.ErrProjectNotFound
+}
 func (noopProjectStore) OwnerByUsername(context.Context, string) (store.Owner, error) {
 	return store.Owner{}, store.ErrNotFound
 }
