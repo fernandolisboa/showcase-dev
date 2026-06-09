@@ -24,7 +24,10 @@ test('lists published projects and plays one by id', async () => {
         json: () =>
           Promise.resolve({
             owner: { username: 'alice' },
-            projects: [{ id: 'p1', name: 'Blog' }],
+            projects: [
+              { id: 'p1', name: 'Blog', slug: 'blog' },
+              { id: 'p2', name: 'Draft', slug: '' },
+            ],
           }),
       } as Response)
     }
@@ -36,7 +39,11 @@ test('lists published projects and plays one by id', async () => {
   renderAt('/alice')
 
   expect(await screen.findByRole('heading', { name: 'alice' })).toBeInTheDocument()
-  expect(screen.getByText('Blog')).toBeInTheDocument()
+  // A Project with a slug links to its shareable /{username}/{slug} page (#51); one
+  // without a slug renders plain text (no link).
+  expect(screen.getByRole('link', { name: 'Blog' })).toHaveAttribute('href', '/alice/blog')
+  expect(screen.getByText('Draft')).toBeInTheDocument()
+  expect(screen.queryByRole('link', { name: 'Draft' })).toBeNull()
 
   fireEvent.click(screen.getByRole('button', { name: /play blog/i }))
   await waitFor(() =>

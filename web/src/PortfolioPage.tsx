@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 import PlayButton from './PlayButton'
 
-type Project = { id: string; name: string }
+type Project = { id: string; name: string; slug: string }
 type Portfolio = { owner: { username: string }; projects: Project[] }
 type Load = 'loading' | 'ready' | 'notfound' | 'error'
 
@@ -56,7 +56,13 @@ export default function PortfolioPage() {
         <ul>
           {data.projects.map((p) => (
             <li key={p.id}>
-              <h2>{p.name}</h2>
+              <h2>
+                {p.slug ? (
+                  <Link to={`/${data.owner.username}/${p.slug}`}>{p.name}</Link>
+                ) : (
+                  p.name
+                )}
+              </h2>
               <PlayButton projectId={p.id} label={`▶ Play ${p.name}`} />
             </li>
           ))}
