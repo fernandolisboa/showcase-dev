@@ -84,7 +84,9 @@ func (noopProjectStore) StartBuild(context.Context, int64, string) (store.Projec
 	return store.Project{}, store.ErrProjectNotFound
 }
 func (noopProjectStore) MarkBuildFailed(context.Context, int64, string, string) error { return nil }
-func (noopProjectStore) PublishProject(context.Context, int64, string, string) error  { return nil }
+func (noopProjectStore) PublishProject(context.Context, int64, string, string, []byte) error {
+	return nil
+}
 func (noopProjectStore) ReclaimStuckBuilds(context.Context, time.Duration, time.Duration) (int64, error) {
 	return 0, nil
 }

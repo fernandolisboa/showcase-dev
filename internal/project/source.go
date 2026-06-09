@@ -47,9 +47,17 @@ func (s *Source) Project(ctx context.Context, projectID string) (runner.Project,
 		// to not-found would silently boot the fallback fixture in its place.
 		return runner.Project{}, fmt.Errorf("decode manifest for project %s: %w", projectID, err)
 	}
-	// Pin the build to the PUBLISHED commit so the play build is a cache hit on the
-	// image built at publish — a Guest gets exactly the published version and never
-	// waits on a rebuild from a moved HEAD (#19). Images stay empty; the BuildingSource
-	// that wraps this fills them (from cache on a hit).
-	return runner.Project{Manifest: m, Commit: p.CommitSHA, Images: map[string]string{}}, nil
+	// Pin the build to the PUBLISHED commits so the play build is a cache hit on the
+	// images built at publish — a Guest gets exactly the published version and never waits
+	// on a rebuild from a moved HEAD (#19). A multi-repo Project pins each service to its
+	// own repo's commit via service_commits (#50); a single-repo / pre-#50 Project has no
+	// service_commits, so every service falls back to the headline Commit. Images stay
+	// empty; the BuildingSource that wraps this fills them (from cache on a hit).
+	var commits map[string]string
+	if len(p.ServiceCommits) > 0 {
+		if err := json.Unmarshal(p.ServiceCommits, &commits); err != nil {
+			return runner.Project{}, fmt.Errorf("decode service commits for project %s: %w", projectID, err)
+		}
+	}
+	return runner.Project{Manifest: m, Commit: p.CommitSHA, Commits: commits, Images: map[string]string{}}, nil
 }

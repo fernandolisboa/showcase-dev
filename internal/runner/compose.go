@@ -25,7 +25,13 @@ type Project struct {
 	// to the project's PUBLISHED commit so a Guest gets exactly that version and never
 	// waits on a rebuild from a moved HEAD. Empty means "resolve the default branch" —
 	// used at publish, where a BuildingSource fills the resolved commit on the way out.
+	// It is the per-service fallback: a service with no entry in Commits uses it.
 	Commit string
+	// Commits pins a per-service source commit (service name -> commit SHA), so a Project
+	// whose services span multiple repos pins each service to its OWN repo's commit
+	// (#50). A service absent from this map falls back to Commit; an empty map (the
+	// fixture, or a pre-#50 single-repo Project) makes every service use Commit.
+	Commits map[string]string
 }
 
 // ProjectSource resolves a Project by id. In the MVP this is a static fixture

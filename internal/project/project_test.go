@@ -175,7 +175,7 @@ func (f *fakeStore) ReclaimStuckBuilds(_ context.Context, _, _ time.Duration) (i
 	return n, nil
 }
 
-func (f *fakeStore) PublishProject(_ context.Context, ownerID int64, id, commitSHA string) error {
+func (f *fakeStore) PublishProject(_ context.Context, ownerID int64, id, commitSHA string, serviceCommits []byte) error {
 	if f.failPublish {
 		return errors.New("boom")
 	}
@@ -183,6 +183,7 @@ func (f *fakeStore) PublishProject(_ context.Context, ownerID int64, id, commitS
 		if f.byOwner[ownerID][i].ID == id {
 			f.byOwner[ownerID][i].Published = true
 			f.byOwner[ownerID][i].CommitSHA = commitSHA
+			f.byOwner[ownerID][i].ServiceCommits = serviceCommits
 			f.byOwner[ownerID][i].BuildState = "published"
 			f.byOwner[ownerID][i].BuildError = ""
 			return nil
@@ -436,9 +437,16 @@ type fakeBuilder struct {
 	called bool
 }
 
-func (f *fakeBuilder) BuildProject(_ context.Context, _, _ string, _ runcontract.Manifest) (string, error) {
+func (f *fakeBuilder) BuildProject(_ context.Context, _, _ string, m runcontract.Manifest) (map[string]string, error) {
 	f.called = true
-	return f.commit, f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	commits := make(map[string]string, len(m.Services))
+	for _, svc := range m.Services {
+		commits[svc.Name] = f.commit // every service "built" at the same fake commit
+	}
+	return commits, nil
 }
 
 // createProject is a helper that creates a project via the handler and returns its id.
@@ -821,8 +829,13 @@ func TestCheckOwnerRepos(t *testing.T) {
 	if err := checkOwnerRepos("me", man("github.com/someoneelse/app")); err == nil {
 		t.Error("a repo the Owner does not own must be rejected")
 	}
-	if err := checkOwnerRepos("me", man("github.com/me/app", "github.com/me/other")); err == nil {
-		t.Error("multiple repos must be rejected (single-repo MVP)")
+	// Multi-repo is now allowed (#50) as long as every repo is the Owner's own.
+	if err := checkOwnerRepos("me", man("github.com/me/app", "github.com/me/other")); err != nil {
+		t.Errorf("own multiple repos should pass now (#50): %v", err)
+	}
+	// ...but one foreign repo among the Owner's own is still rejected.
+	if err := checkOwnerRepos("me", man("github.com/me/app", "github.com/someoneelse/other")); err == nil {
+		t.Error("a foreign repo among the Owner's own must still be rejected")
 	}
 	if err := checkOwnerRepos("me", man("not a repo")); err == nil {
 		t.Error("an unparseable repo must be rejected")

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -220,35 +221,45 @@ func main() {
 	if dbStore != nil {
 		var pb project.ProjectBuilder
 		if ghClient != nil {
-			pb = builderFunc(func(ctx context.Context, _, projectID string, m runcontract.Manifest) (string, error) {
+			pb = builderFunc(func(ctx context.Context, _, projectID string, m runcontract.Manifest) (map[string]string, error) {
 				if len(m.Services) == 0 {
-					return "", fmt.Errorf("project has no services")
+					return nil, fmt.Errorf("project has no services")
 				}
 				// Services build serially, each capped by the sandbox per-build timeout
 				// (ADR-0010); bound the whole publish accordingly.
 				bctx, cancel := context.WithTimeout(ctx, time.Duration(len(m.Services)+1)*cfg.BuildTimeout)
 				defer cancel()
-				// Resolve the repo's HEAD ONCE and pin every service to it (the handler
-				// enforces a single repo before publishing), so the whole Project builds
-				// at one atomic commit even under a concurrent push — and a later play,
-				// pinned to this same commit, is a cache hit for every service.
-				owner, repo, err := githubapp.ParseRepo(m.Services[0].Repo)
-				if err != nil {
-					return "", err
+				// Resolve each DISTINCT repo's HEAD once and pin every service to its own
+				// repo's commit (#50), so a Project spanning repos builds each service at one
+				// atomic commit even under a concurrent push — and a later play, pinned to
+				// these same commits, is a cache hit for every service. Services sharing a
+				// repo share its resolved commit (resolved only once per repo).
+				repoHEAD := map[string]string{}
+				serviceCommits := make(map[string]string, len(m.Services))
+				for _, svc := range m.Services {
+					owner, repo, err := githubapp.ParseRepo(svc.Repo)
+					if err != nil {
+						return nil, err
+					}
+					key := strings.ToLower(owner + "/" + repo)
+					sha, ok := repoHEAD[key]
+					if !ok {
+						tok, _, err := ghClient.InstallationToken(bctx, owner, repo)
+						if err != nil {
+							return nil, err
+						}
+						if sha, err = githubapp.ResolveCommit(bctx, owner, repo, "HEAD", tok); err != nil {
+							return nil, err
+						}
+						repoHEAD[key] = sha
+					}
+					serviceCommits[svc.Name] = sha
 				}
-				tok, _, err := ghClient.InstallationToken(bctx, owner, repo)
-				if err != nil {
-					return "", err
-				}
-				sha, err := githubapp.ResolveCommit(bctx, owner, repo, "HEAD", tok)
-				if err != nil {
-					return "", err
-				}
-				draft := runner.StaticSource{P: runner.Project{Manifest: m, Commit: sha}}
+				draft := runner.StaticSource{P: runner.Project{Manifest: m, Commits: serviceCommits}}
 				if _, err := builder.NewBuildingSource(draft, imageBuilder, specFunc, logger).Project(bctx, projectID); err != nil {
-					return "", err
+					return nil, err
 				}
-				return sha, nil
+				return serviceCommits, nil
 			})
 		}
 		// The Publisher runs publish builds on a background goroutine (#49) so the Owner's
@@ -343,9 +354,9 @@ func main() {
 }
 
 // builderFunc adapts a function to project.ProjectBuilder.
-type builderFunc func(ctx context.Context, ownerLogin, projectID string, m runcontract.Manifest) (string, error)
+type builderFunc func(ctx context.Context, ownerLogin, projectID string, m runcontract.Manifest) (map[string]string, error)
 
-func (f builderFunc) BuildProject(ctx context.Context, ownerLogin, projectID string, m runcontract.Manifest) (string, error) {
+func (f builderFunc) BuildProject(ctx context.Context, ownerLogin, projectID string, m runcontract.Manifest) (map[string]string, error) {
 	return f(ctx, ownerLogin, projectID, m)
 }
 

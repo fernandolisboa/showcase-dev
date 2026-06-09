@@ -52,13 +52,19 @@ func (s *BuildingSource) Project(ctx context.Context, projectID string) (runner.
 	// Build every declared service. A Seed reuses a declared service's image
 	// (manifest validation requires seed.service to be a declared service), so
 	// building all services also supplies the seed's image — no special case.
-	// p.Commit pins the revision and is passed unchanged to every service: the play
-	// path sets it to the published commit (so each build is a cache hit on the
-	// published image), and the publisher pins the repo's resolved HEAD before calling
-	// so the whole Project builds at ONE commit (no per-service HEAD drift).
+	// Each service builds at its OWN pinned commit: Commits[svc] if present (a
+	// multi-repo Project pins each service to its repo's commit, #50), else the
+	// project-wide Commit fallback. The play path sets these to the PUBLISHED commits
+	// (so each build is a cache hit on the published image); at publish the publisher
+	// pins each repo's resolved HEAD before calling, so there is no per-service HEAD
+	// drift within a build.
 	images := make(map[string]string, len(p.Manifest.Services))
 	for _, svc := range p.Manifest.Services {
-		spec, err := s.spec(ctx, projectID, svc, p.Commit)
+		commit := p.Commit
+		if c, ok := p.Commits[svc.Name]; ok && c != "" {
+			commit = c
+		}
+		spec, err := s.spec(ctx, projectID, svc, commit)
 		if err != nil {
 			return runner.Project{}, fmt.Errorf("resolve build spec for %s/%s: %w", projectID, svc.Name, err)
 		}
