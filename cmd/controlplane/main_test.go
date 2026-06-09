@@ -43,7 +43,7 @@ func TestRunReturnsErrorOnBindFailure(t *testing.T) {
 	srv := &http.Server{Addr: occupied.Addr().String()}
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, stop, logger, srv, testManager(), srv.Addr, "test") }()
+	go func() { done <- run(ctx, stop, logger, srv, testManager(), nil, srv.Addr, "test") }()
 
 	select {
 	case err := <-done:
@@ -62,7 +62,7 @@ func TestRunReturnsNilOnSignalShutdown(t *testing.T) {
 	srv := &http.Server{Addr: "127.0.0.1:0"} // ephemeral port: binds successfully
 
 	done := make(chan error, 1)
-	go func() { done <- run(ctx, stop, logger, srv, testManager(), srv.Addr, "test") }()
+	go func() { done <- run(ctx, stop, logger, srv, testManager(), nil, srv.Addr, "test") }()
 
 	// Give the listener a moment to come up, then trigger a "signal" shutdown.
 	time.Sleep(100 * time.Millisecond)

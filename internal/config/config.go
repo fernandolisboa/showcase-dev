@@ -115,6 +115,13 @@ type Config struct {
 	// BuildTimeout is the wall-clock cap per build; on expiry the build container is
 	// force-removed (ADR-0010).
 	BuildTimeout time.Duration
+	// BuildReapGrace is the slack the recovery sweep allows BEYOND a build's own time
+	// bound before it reclaims the Project as 'failed' (#49). The sweep computes each
+	// Project's bound from its own service count — (serviceCount+1)*BuildTimeout, the same
+	// bound publish enforces — and only reclaims a build older than that bound + this
+	// grace, so a live build is never reclaimed regardless of how many services it has,
+	// while a build stranded by a crash/restart is recovered shortly after its bound.
+	BuildReapGrace time.Duration
 	// MaxSessions is the global cap on concurrent Sessions (ADR-0006), sized to host
 	// capacity ÷ per-Session budget (ADR-0002). At the cap a play request is
 	// rejected with an "at capacity" response rather than queued. A value <= 0
@@ -158,6 +165,7 @@ func Load() Config {
 		BuildCPUs:           getenvFloat("BUILD_CPUS", 2.0),
 		BuildPidsLimit:      getenvInt("BUILD_PIDS_LIMIT", 2048),
 		BuildTimeout:        getenvDuration("BUILD_TIMEOUT", 5*time.Minute),
+		BuildReapGrace:      getenvDuration("BUILD_REAP_GRACE", 10*time.Minute),
 	}
 }
 

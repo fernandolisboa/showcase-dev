@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/fernandolisboa/showcase-dev/internal/auth"
@@ -43,16 +44,16 @@ type Store interface {
 	StartBuild(ctx context.Context, ownerID int64, id string) (store.Project, error)
 	MarkBuildFailed(ctx context.Context, ownerID int64, id, buildError string) error
 	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error
+	ReclaimStuckBuilds(ctx context.Context, perServiceTimeout, grace time.Duration) (int64, error)
 	OwnerByUsername(ctx context.Context, username string) (store.Owner, error)
 	ListPublishedProjectsByUsername(ctx context.Context, username string) ([]store.Project, error)
 }
 
 // ProjectBuilder builds every service of a Project's manifest from source at publish,
 // returning the commit it built (the headline/UI commit) so the publisher can pin it.
-// It is the seam to the image builder + repo clone; nil disables publishing (no
-// GitHub App credentials), so the handler degrades to 501 without a database/build of
-// untrusted Owner code in dev. An error means the build failed — the Project is not
-// published. ownerLogin scopes which installation the clone token is minted for.
+// It is the seam to the image builder + repo clone. An error means the build failed —
+// the Project is not published. ownerLogin scopes which installation the clone token is
+// minted for. It is synchronous (the Publisher runs it on a background goroutine).
 type ProjectBuilder interface {
 	BuildProject(ctx context.Context, ownerLogin, projectID string, manifest runcontract.Manifest) (commitSHA string, err error)
 }
@@ -60,13 +61,14 @@ type ProjectBuilder interface {
 // Handlers serve the Owner project endpoints. Construct with NewHandlers and mount
 // each method behind auth.RequireOwner (they read the Owner from context).
 type Handlers struct {
-	store   Store
-	builder ProjectBuilder // nil => publishing is not configured (501)
+	store     Store
+	publisher *Publisher // nil => publishing is not configured (501)
 }
 
-// NewHandlers wires the project handlers to a Store and (optionally) a ProjectBuilder.
-// A nil builder leaves create/list/get working but makes publish report 501.
-func NewHandlers(s Store, b ProjectBuilder) *Handlers { return &Handlers{store: s, builder: b} }
+// NewHandlers wires the project handlers to a Store and (optionally) a Publisher. A nil
+// publisher leaves create/list/get/update working but makes publish report 501 (no
+// GitHub App credentials in dev).
+func NewHandlers(s Store, p *Publisher) *Handlers { return &Handlers{store: s, publisher: p} }
 
 // Create persists a new Project for the signed-in Owner. Body: a Form (JSON).
 // It maps the form to a runcontract.Manifest, validates it (reusing the contract's
@@ -216,21 +218,21 @@ func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(projectView(p))
 }
 
-// Publish builds the signed-in Owner's Project from source and, on success, marks it
-// published at the built commit (ADR-0003: build at publish, run from cache). It is
-// synchronous — the Owner waits for the build — and records the build lifecycle on the
-// Project as it goes (building → published|failed, #49). Must be mounted behind
-// RequireOwner with an {id} path value. 404 if the Project is not theirs, 501 if
-// publishing is not configured (no GitHub App credentials), 409 if a build is already in
-// flight, 422 if the repo is not theirs / not a single repo / fails to build, 200 with
-// the published view on success.
+// Publish kicks off a background build of the signed-in Owner's Project from source and
+// returns immediately (202) with the Project in 'building' — the build proceeds off the
+// request and settles the lifecycle when it finishes (building → published|failed, #49,
+// ADR-0003: build at publish, run from cache). The Owner observes progress by re-reading
+// the Project (buildState/buildError). Must be mounted behind RequireOwner with an {id}
+// path value. 404 if the Project is not theirs, 501 if publishing is not configured (no
+// GitHub App credentials), 409 if a build is already in flight, 422 if the repo is not
+// theirs / not a single repo, 202 with the 'building' view once the build is launched.
 func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 	owner, ok := auth.OwnerFrom(r.Context())
 	if !ok {
 		http.Error(w, "not signed in", http.StatusUnauthorized)
 		return
 	}
-	if h.builder == nil {
+	if h.publisher == nil {
 		http.Error(w, "publishing is not configured", http.StatusNotImplemented)
 		return
 	}
@@ -249,65 +251,37 @@ func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// Security: an Owner may only publish their OWN repositories, and (MVP) every
-	// service must come from one repository so a single commit pins the whole Project.
-	// Checked before marking the build started, so a rejected repo never enters 'building'.
+	// Security: an Owner may only publish their OWN repositories, and (MVP) every service
+	// must come from one repository so a single commit pins the whole Project. Checked
+	// before marking the build started, so a rejected repo never enters 'building'.
 	if err := checkOwnerRepos(owner.GitHubLogin, m); err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 
 	// Transition to 'building' first — this also rejects a duplicate publish (409) while a
-	// build is already in flight, so only one build of a Project runs at a time (#49).
-	if _, err := h.store.StartBuild(r.Context(), owner.ID, p.ID); err != nil {
-		switch {
-		case errors.Is(err, store.ErrBuildInProgress):
-			http.Error(w, "a build is already in progress for this project", http.StatusConflict)
-		case errors.Is(err, store.ErrProjectNotFound):
-			http.Error(w, "project not found", http.StatusNotFound)
-		default:
-			http.Error(w, "internal error", http.StatusInternalServerError)
-		}
+	// build is already in flight, so only one build of a Project runs at a time (#49). It
+	// must precede launching the build so two concurrent requests can't both spawn a build.
+	started, err := h.store.StartBuild(r.Context(), owner.ID, p.ID)
+	switch {
+	case errors.Is(err, store.ErrBuildInProgress):
+		http.Error(w, "a build is already in progress for this project", http.StatusConflict)
 		return
-	}
-
-	// Settle writes use a cancel-resistant context: the build may have failed BECAUSE the
-	// Owner disconnected mid-build (the request is synchronous and slow), and a settle that
-	// ran on the cancelled request context would itself fail — leaving the row stuck in
-	// 'building', where every retry 409s. This mirrors the codebase's after-failure writes
-	// (migrate.go's advisory unlock, the reaper's teardown, compose.go's Teardown).
-	settleCtx := context.WithoutCancel(r.Context())
-
-	commitSHA, err := h.builder.BuildProject(r.Context(), owner.GitHubLogin, p.ID, m)
-	if err != nil {
-		// A repo the App can't reach is an actionable, terse message; any other failure
-		// returns a bounded build log (the build runs the Owner's own code, so its output
-		// carries no platform secret — the clone layer already redacts the token from its
-		// errors). The same message is recorded as the build error the Owner can read back.
-		msg := "build failed:\n" + lastBytes(err.Error(), 4<<10)
-		if errors.Is(err, githubapp.ErrNoInstallation) {
-			msg = "the Showcase GitHub App is not installed on that repository"
-		}
-		_ = h.store.MarkBuildFailed(settleCtx, owner.ID, p.ID, msg)
-		http.Error(w, msg, http.StatusUnprocessableEntity)
+	case errors.Is(err, store.ErrProjectNotFound):
+		http.Error(w, "project not found", http.StatusNotFound)
 		return
-	}
-
-	if err := h.store.PublishProject(r.Context(), owner.ID, p.ID, commitSHA); err != nil {
-		// The build succeeded but recording the publish failed; settle out of 'building' so
-		// the Owner can retry (a retry rebuilds from cache, so it is cheap) rather than
-		// being wedged at 409. published/commit_sha are untouched (PublishProject is atomic),
-		// so a previously-published version keeps playing.
-		_ = h.store.MarkBuildFailed(settleCtx, owner.ID, p.ID, "build succeeded but publishing failed; please retry")
+	case err != nil:
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	p.Published = true
-	p.CommitSHA = commitSHA
-	p.BuildState = "published"
-	p.BuildError = ""
+
+	// Launch the build in the background; it settles build_state when it finishes. The
+	// Owner gets the 'building' view immediately and polls for the outcome.
+	h.publisher.Start(owner.ID, owner.GitHubLogin, p.ID, m)
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(projectView(p))
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(projectView(started))
 }
 
 // Portfolio is the PUBLIC listing of an Owner's published Projects at /{username}

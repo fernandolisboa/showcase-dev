@@ -6,15 +6,40 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fernandolisboa/showcase-dev/internal/auth"
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 	"github.com/fernandolisboa/showcase-dev/internal/store"
 )
+
+// discardLogger is a no-op logger for the Publisher in tests.
+func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// newPublishHandlers wires a Handlers with a Publisher over fb, returning both so a test
+// can drain the async build via pub.wait() before asserting the settled outcome.
+func newPublishHandlers(fs *fakeStore, fb *fakeBuilder) (*Handlers, *Publisher) {
+	pub := NewPublisher(fs, fb, discardLogger())
+	return NewHandlers(fs, pub), pub
+}
+
+// publishAndSettle publishes (asserting the 202 kickoff) and drains the background build,
+// so the test can then assert the settled build_state. For tests asserting the immediate
+// response (409/422/501/404/401), call publish directly.
+func publishAndSettle(t *testing.T, h *Handlers, pub *Publisher, id string, owner store.Owner) {
+	t.Helper()
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("publish = %d, want 202; body=%s", rec.Code, rec.Body)
+	}
+	pub.wait()
+}
 
 // fakeStore is an in-memory Store for handler tests — no database. It keys Projects
 // by owner so it can exercise the per-owner uniqueness and ownership scoping the
@@ -132,6 +157,22 @@ func (f *fakeStore) MarkBuildFailed(_ context.Context, ownerID int64, id, buildE
 		}
 	}
 	return store.ErrProjectNotFound
+}
+
+// ReclaimStuckBuilds reclaims every 'building' row (the fake ignores the timing args — the
+// per-row staleness window is exercised against real Postgres in the store integration test).
+func (f *fakeStore) ReclaimStuckBuilds(_ context.Context, _, _ time.Duration) (int64, error) {
+	var n int64
+	for ownerID := range f.byOwner {
+		for i := range f.byOwner[ownerID] {
+			if f.byOwner[ownerID][i].BuildState == "building" {
+				f.byOwner[ownerID][i].BuildState = "failed"
+				f.byOwner[ownerID][i].BuildError = "the build did not finish; please retry"
+				n++
+			}
+		}
+	}
+	return n, nil
 }
 
 func (f *fakeStore) PublishProject(_ context.Context, ownerID int64, id, commitSHA string) error {
@@ -427,45 +468,45 @@ func publish(t *testing.T, h *Handlers, id string, owner store.Owner) *httptest.
 func TestPublishSuccess(t *testing.T) {
 	fs := newFakeStore()
 	fb := &fakeBuilder{commit: "abc123"}
-	h := NewHandlers(fs, fb)
+	h, pub := newPublishHandlers(fs, fb)
 	owner := store.Owner{ID: 1, GitHubLogin: "me"} // validForm's repo is github.com/me/blog
 	id := createProject(t, h, validForm(), owner)
 
+	// The 202 kickoff reports 'building'; the build settles to published in the background.
 	rec := publish(t, h, id, owner)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("publish = %d, want 200; body=%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("publish = %d, want 202; body=%s", rec.Code, rec.Body)
 	}
-	var got map[string]any
-	_ = json.NewDecoder(rec.Body).Decode(&got)
-	if got["published"] != true || got["commitSha"] != "abc123" || got["buildState"] != "published" {
-		t.Errorf("unexpected publish response: %v", got)
+	var kickoff map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&kickoff)
+	if kickoff["buildState"] != "building" || kickoff["published"] != false {
+		t.Errorf("202 kickoff should report 'building', got %v", kickoff)
 	}
+
+	pub.wait()
 	if stored := fs.byOwner[1][0]; !stored.Published || stored.CommitSHA != "abc123" || stored.BuildState != "published" {
-		t.Errorf("project not persisted as published: %+v", stored)
+		t.Errorf("project not settled as published: %+v", stored)
 	}
 }
 
 func TestPublishBuildFailureDoesNotPublish(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, &fakeBuilder{err: errors.New("RUN npm ci failed: exit 1")})
+	h, pub := newPublishHandlers(fs, &fakeBuilder{err: errors.New("RUN npm ci failed: exit 1")})
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), owner)
 
-	rec := publish(t, h, id, owner)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("build-fail publish = %d, want 422", rec.Code)
-	}
+	publishAndSettle(t, h, pub, id, owner)
 	if stored := fs.byOwner[1][0]; stored.Published {
 		t.Error("a project whose build failed must not be published")
 	} else if stored.BuildState != "failed" || stored.BuildError == "" {
-		t.Errorf("a failed build must record build_state='failed' + an error, got %+v", stored)
+		t.Errorf("a failed build must settle build_state='failed' + an error, got %+v", stored)
 	}
 }
 
 func TestPublishWhileBuildingIs409(t *testing.T) {
 	fs := newFakeStore()
 	fb := &fakeBuilder{commit: "abc123"}
-	h := NewHandlers(fs, fb)
+	h, _ := newPublishHandlers(fs, fb)
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), owner)
 	// Simulate a build already in flight (as a concurrent publish would have left it).
@@ -483,20 +524,15 @@ func TestPublishWhileBuildingIs409(t *testing.T) {
 func TestPublishFailedRebuildKeepsPublished(t *testing.T) {
 	fs := newFakeStore()
 	fb := &fakeBuilder{commit: "abc123"}
-	h := NewHandlers(fs, fb)
+	h, pub := newPublishHandlers(fs, fb)
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), owner)
-	if rec := publish(t, h, id, owner); rec.Code != http.StatusOK {
-		t.Fatalf("initial publish = %d, body=%s", rec.Code, rec.Body)
-	}
+	publishAndSettle(t, h, pub, id, owner)
 
 	// A failing RE-build must not un-publish the live version (a failed build never
 	// un-publishes — the old build keeps playing while build_state reports the failure).
 	fb.err = errors.New("RUN build failed")
-	rec := publish(t, h, id, owner)
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("failed re-build = %d, want 422", rec.Code)
-	}
+	publishAndSettle(t, h, pub, id, owner)
 	if stored := fs.byOwner[1][0]; !stored.Published || stored.CommitSHA != "abc123" || stored.BuildState != "failed" {
 		t.Errorf("a failed re-build must keep the prior publish live: %+v", stored)
 	}
@@ -505,14 +541,11 @@ func TestPublishFailedRebuildKeepsPublished(t *testing.T) {
 func TestPublishPersistFailureSettlesState(t *testing.T) {
 	fs := newFakeStore()
 	fs.failPublish = true // the build succeeds but recording the publish fails
-	h := NewHandlers(fs, &fakeBuilder{commit: "abc123"})
+	h, pub := newPublishHandlers(fs, &fakeBuilder{commit: "abc123"})
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), owner)
 
-	rec := publish(t, h, id, owner)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("publish with a failing persist = %d, want 500", rec.Code)
-	}
+	publishAndSettle(t, h, pub, id, owner)
 	// The row must settle to 'failed' (retryable), not be stranded in 'building' (which
 	// would 409 every retry).
 	if stored := fs.byOwner[1][0]; stored.BuildState != "failed" || stored.BuildError == "" {
@@ -522,18 +555,18 @@ func TestPublishPersistFailureSettlesState(t *testing.T) {
 
 func TestPublishWithoutBuilderIs501(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, nil) // no builder configured
+	h := NewHandlers(fs, nil) // no publisher configured
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), owner)
 	if rec := publish(t, h, id, owner); rec.Code != http.StatusNotImplemented {
-		t.Fatalf("publish without a builder = %d, want 501", rec.Code)
+		t.Fatalf("publish without a publisher = %d, want 501", rec.Code)
 	}
 }
 
 func TestPublishRejectsCrossOwnerRepoWithoutBuilding(t *testing.T) {
 	fs := newFakeStore()
 	fb := &fakeBuilder{commit: "x"}
-	h := NewHandlers(fs, fb)
+	h, _ := newPublishHandlers(fs, fb)
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	form := validForm()
 	form.Services[0].Repo = "github.com/someoneelse/proj" // not the owner's repo
@@ -546,11 +579,14 @@ func TestPublishRejectsCrossOwnerRepoWithoutBuilding(t *testing.T) {
 	if fb.called {
 		t.Error("must reject a non-owner repo BEFORE attempting a build")
 	}
+	if fs.byOwner[1][0].BuildState == "building" {
+		t.Error("a rejected repo must never enter 'building'")
+	}
 }
 
 func TestPublishNotOwnerIs404(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, &fakeBuilder{commit: "x"})
+	h, _ := newPublishHandlers(fs, &fakeBuilder{commit: "x"})
 	alice := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), alice)
 	// Bob tries to publish Alice's project.
@@ -561,7 +597,7 @@ func TestPublishNotOwnerIs404(t *testing.T) {
 }
 
 func TestPublishRequiresOwner(t *testing.T) {
-	h := NewHandlers(newFakeStore(), &fakeBuilder{})
+	h := NewHandlers(newFakeStore(), nil)
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/api/owner/projects/x/publish", nil)
 	r.SetPathValue("id", "x")
@@ -603,12 +639,10 @@ func TestUpdateReplacesManifest(t *testing.T) {
 
 func TestUpdateUnpublishesWhenManifestChanges(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, &fakeBuilder{commit: "abc123"})
+	h, pub := newPublishHandlers(fs, &fakeBuilder{commit: "abc123"})
 	owner := store.Owner{ID: 1, GitHubLogin: "me"} // validForm's repo is github.com/me/blog
 	id := createProject(t, h, validForm(), owner)
-	if rec := publish(t, h, id, owner); rec.Code != http.StatusOK {
-		t.Fatalf("publish setup = %d, body=%s", rec.Code, rec.Body)
-	}
+	publishAndSettle(t, h, pub, id, owner)
 
 	edited := validForm()
 	edited.Services[0].Port = 3000 // a real manifest change
@@ -628,12 +662,10 @@ func TestUpdateUnpublishesWhenManifestChanges(t *testing.T) {
 
 func TestUpdatePureRenameKeepsPublished(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, &fakeBuilder{commit: "abc123"})
+	h, pub := newPublishHandlers(fs, &fakeBuilder{commit: "abc123"})
 	owner := store.Owner{ID: 1, GitHubLogin: "me"}
 	id := createProject(t, h, validForm(), owner)
-	if rec := publish(t, h, id, owner); rec.Code != http.StatusOK {
-		t.Fatalf("publish setup = %d, body=%s", rec.Code, rec.Body)
-	}
+	publishAndSettle(t, h, pub, id, owner)
 
 	renamed := validForm() // identical services → manifest unchanged
 	renamed.Name = "blog-renamed"
@@ -712,7 +744,7 @@ func portfolio(t *testing.T, h *Handlers, username string) *httptest.ResponseRec
 
 func TestPortfolioListsOnlyPublished(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, &fakeBuilder{commit: "c"})
+	h, pub := newPublishHandlers(fs, &fakeBuilder{commit: "c"})
 	// GitHubLogin must match validForm's repo owner ("me") so publish passes.
 	alice := store.Owner{ID: 1, Username: "alice", GitHubLogin: "me"}
 	fs.owners["alice"] = alice
@@ -721,9 +753,7 @@ func TestPortfolioListsOnlyPublished(t *testing.T) {
 	draftForm := validForm()
 	draftForm.Name = "draft"
 	createProject(t, h, draftForm, alice) // left unpublished
-	if rec := publish(t, h, published, alice); rec.Code != http.StatusOK {
-		t.Fatalf("publish setup = %d, body=%s", rec.Code, rec.Body)
-	}
+	publishAndSettle(t, h, pub, published, alice)
 
 	rec := portfolio(t, h, "Alice") // case-insensitive
 	if rec.Code != http.StatusOK {
@@ -751,7 +781,7 @@ func TestPortfolioUnknownUserIs404(t *testing.T) {
 
 func TestPortfolioEmptyWhenNothingPublished(t *testing.T) {
 	fs := newFakeStore()
-	h := NewHandlers(fs, &fakeBuilder{})
+	h := NewHandlers(fs, nil) // no publish in this test
 	alice := store.Owner{ID: 1, Username: "alice", GitHubLogin: "me"}
 	fs.owners["alice"] = alice
 	createProject(t, h, validForm(), alice) // draft only

@@ -414,6 +414,63 @@ func TestBuildLifecycle(t *testing.T) {
 	}
 }
 
+// TestReclaimStuckBuilds verifies the #49 recovery sweep: a build is reclaimed to 'failed'
+// only once it is older than its OWN bound — (serviceCount+1)*perServiceTimeout + grace —
+// so a live build is never touched, and a project with more services is given a
+// proportionally longer window.
+func TestReclaimStuckBuilds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	alice, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+
+	one := []byte(`{"Services":[{"Name":"web","Role":"ui"}]}`)
+	two := []byte(`{"Services":[{"Name":"web","Role":"ui"},{"Name":"api","Role":"api","PathPrefix":"/api"}]}`)
+	p1, _ := s.CreateProject(ctx, alice.ID, "one-svc", one)
+	p2, _ := s.CreateProject(ctx, alice.ID, "two-svc", two)
+	for _, id := range []string{p1.ID, p2.ID} {
+		if _, err := s.StartBuild(ctx, alice.ID, id); err != nil {
+			t.Fatalf("StartBuild(%s): %v", id, err)
+		}
+	}
+
+	// A build that just started is NOT stale, so a generous window reclaims nothing.
+	if n, err := s.ReclaimStuckBuilds(ctx, time.Hour, time.Hour); err != nil || n != 0 {
+		t.Fatalf("ReclaimStuckBuilds(recent) = (%d, %v), want (0, nil)", n, err)
+	}
+
+	// Age both builds to 25 minutes ago. With perServiceTimeout=10m, grace=0 the windows are
+	// p1: (1+1)*10m = 20m and p2: (2+1)*10m = 30m. So the 1-service build (25m > 20m) is
+	// reclaimed but the 2-service build (25m < 30m) is still within its bound — the per-row
+	// window in action.
+	if _, err := s.pool.Exec(ctx, "UPDATE projects SET build_started_at = now() - interval '25 minutes' WHERE owner_id = $1", alice.ID); err != nil {
+		t.Fatalf("age builds: %v", err)
+	}
+	n, err := s.ReclaimStuckBuilds(ctx, 10*time.Minute, 0)
+	if err != nil || n != 1 {
+		t.Fatalf("ReclaimStuckBuilds(per-row) = (%d, %v), want (1, nil) — only the 1-service build", n, err)
+	}
+	r1, _ := s.GetOwnerProject(ctx, alice.ID, p1.ID)
+	if r1.BuildState != "failed" || r1.BuildError == "" || r1.Published {
+		t.Errorf("the 1-service build past its bound = %+v, want failed with an error", r1)
+	}
+	if r2, _ := s.GetOwnerProject(ctx, alice.ID, p2.ID); r2.BuildState != "building" {
+		t.Errorf("the 2-service build within its longer bound must stay 'building', got %q", r2.BuildState)
+	}
+
+	// Idempotent: the already-reclaimed build is not reclaimed again, and the 2-service one
+	// is reclaimed once its (longer) window also passes.
+	if n, _ := s.ReclaimStuckBuilds(ctx, 10*time.Minute, 0); n != 0 {
+		t.Errorf("a settled build must not be reclaimed again, got %d", n)
+	}
+	if n, _ := s.ReclaimStuckBuilds(ctx, 0, 0); n != 1 {
+		t.Errorf("the 2-service build must reclaim once its window passes, got %d", n)
+	}
+}
+
 // A migration file edited after being applied must be rejected (append-only).
 func TestMigrateRejectsModifiedMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
