@@ -28,6 +28,11 @@ var ErrProjectNotFound = errors.New("store: project not found")
 // requested name (the per-owner UNIQUE constraint, mapped from 23505).
 var ErrProjectNameTaken = errors.New("store: project name already taken")
 
+// ErrBuildInProgress is returned by StartBuild when the Project already has a build in
+// flight (build_state = 'building'), so a caller can reject a duplicate publish (409)
+// rather than starting a second concurrent build of the same Project (#49).
+var ErrBuildInProgress = errors.New("store: a build is already in progress")
+
 // Project is a persisted Owner app (#19). Manifest is the Owner's run contract
 // (ADR-0003) stored verbatim as jsonb; this layer keeps it opaque ([]byte) so the
 // store stays domain-agnostic — the runner adapter unmarshals it into a
@@ -43,8 +48,16 @@ type Project struct {
 	// the first publish). It pins the played version — the build path uses it as the
 	// cache key so play is a cache hit on the published image (#19).
 	CommitSHA string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// BuildState is the Owner-facing build lifecycle (#49): idle | building | failed |
+	// published. It is independent of Published (the play gate): a re-build of a
+	// published Project is published=true + build_state='building', and a failed
+	// re-build stays published=true + build_state='failed' (a failed build never
+	// un-publishes). BuildError holds a bounded log tail while build_state='failed',
+	// empty otherwise.
+	BuildState string
+	BuildError string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // CreateProject inserts a new Project for an Owner. manifest must already be a
@@ -55,10 +68,10 @@ func (s *Store) CreateProject(ctx context.Context, ownerID int64, name string, m
 	const q = `
 INSERT INTO projects (owner_id, name, manifest)
 VALUES ($1, $2, $3)
-RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at`
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, created_at, updated_at`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, ownerID, name, manifest).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 		return Project{}, ErrProjectNameTaken
@@ -77,11 +90,11 @@ func (s *Store) GetOwnerProject(ctx context.Context, ownerID int64, id string) (
 		return Project{}, ErrProjectNotFound
 	}
 	const q = `
-SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, created_at, updated_at
 FROM projects WHERE id = $1 AND owner_id = $2`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id, ownerID).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
 	}
@@ -101,11 +114,11 @@ func (s *Store) GetPublishedProject(ctx context.Context, id string) (Project, er
 		return Project{}, ErrProjectNotFound
 	}
 	const q = `
-SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, created_at, updated_at
 FROM projects WHERE id = $1 AND published`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Project{}, ErrProjectNotFound
 	}
@@ -118,7 +131,7 @@ FROM projects WHERE id = $1 AND published`
 // ListProjectsByOwner returns an Owner's Projects, newest first.
 func (s *Store) ListProjectsByOwner(ctx context.Context, ownerID int64) ([]Project, error) {
 	const q = `
-SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at
+SELECT id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, created_at, updated_at
 FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 	rows, err := s.pool.Query(ctx, q, ownerID)
 	if err != nil {
@@ -134,7 +147,7 @@ FROM projects WHERE owner_id = $1 ORDER BY created_at DESC`
 // "Owner with nothing published".
 func (s *Store) ListPublishedProjectsByUsername(ctx context.Context, username string) ([]Project, error) {
 	const q = `
-SELECT p.id, p.owner_id, p.name, p.manifest, p.published, COALESCE(p.commit_sha, '') AS commit_sha, p.created_at, p.updated_at
+SELECT p.id, p.owner_id, p.name, p.manifest, p.published, COALESCE(p.commit_sha, '') AS commit_sha, p.build_state, COALESCE(p.build_error, '') AS build_error, p.created_at, p.updated_at
 FROM projects p JOIN owners o ON o.id = p.owner_id
 WHERE o.username = $1 AND p.published
 ORDER BY p.created_at DESC`
@@ -151,7 +164,7 @@ func scanProjects(rows pgx.Rows) ([]Project, error) {
 	var ps []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		ps = append(ps, p)
@@ -164,7 +177,8 @@ func scanProjects(rows pgx.Rows) ([]Project, error) {
 
 // PublishProject marks one of an Owner's Projects published and records the commit it
 // was built at, atomically (so a Guest never sees published-without-a-pinned-commit).
-// Owner-scoped: a cross-owner or missing id affects no row and returns
+// It also settles the build lifecycle to 'published' and clears any prior build error
+// (#49). Owner-scoped: a cross-owner or missing id affects no row and returns
 // ErrProjectNotFound. The caller publishes only after a successful build, so a
 // published Project is always buildable at the recorded commit (#19).
 func (s *Store) PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error {
@@ -172,7 +186,7 @@ func (s *Store) PublishProject(ctx context.Context, ownerID int64, id, commitSHA
 		return ErrProjectNotFound
 	}
 	const q = `
-UPDATE projects SET published = true, commit_sha = $3, updated_at = now()
+UPDATE projects SET published = true, build_state = 'published', build_error = NULL, commit_sha = $3, updated_at = now()
 WHERE id = $1 AND owner_id = $2`
 	tag, err := s.pool.Exec(ctx, q, id, ownerID, commitSHA)
 	if err != nil {
@@ -185,10 +199,11 @@ WHERE id = $1 AND owner_id = $2`
 }
 
 // UpdateProject replaces the name and manifest of one of an Owner's Projects. When the
-// manifest actually changes it returns the Project to draft — published is cleared and
-// the pinned commit_sha dropped — so a stale build can never outlive an edited run
-// contract (#51: the Owner re-publishes to rebuild). A pure rename (manifest unchanged)
-// keeps the Project published at its commit. Owner-scoped: a cross-owner or missing id
+// manifest actually changes it returns the Project to draft — published is cleared, the
+// pinned commit_sha dropped, and the build lifecycle reset to 'idle' with any build
+// error cleared — so a stale build can never outlive an edited run contract (#51/#49:
+// the Owner re-publishes to rebuild). A pure rename (manifest unchanged) keeps the
+// Project published at its commit and its build state intact. Owner-scoped: a cross-owner or missing id
 // affects no row and returns ErrProjectNotFound; a name another of the Owner's Projects
 // already uses surfaces as ErrProjectNameTaken (the per-owner UNIQUE). manifest must
 // already be a validated, canonical JSON encoding (the project layer maps the Owner form
@@ -207,12 +222,14 @@ SET name = $3,
     manifest = $4,
     published = CASE WHEN manifest IS DISTINCT FROM $4 THEN false ELSE published END,
     commit_sha = CASE WHEN manifest IS DISTINCT FROM $4 THEN NULL ELSE commit_sha END,
+    build_state = CASE WHEN manifest IS DISTINCT FROM $4 THEN 'idle' ELSE build_state END,
+    build_error = CASE WHEN manifest IS DISTINCT FROM $4 THEN NULL ELSE build_error END,
     updated_at = now()
 WHERE id = $1 AND owner_id = $2
-RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at`
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, created_at, updated_at`
 	var p Project
 	err := s.pool.QueryRow(ctx, q, id, ownerID, name, manifest).
-		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 		return Project{}, ErrProjectNameTaken
@@ -224,4 +241,59 @@ RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS c
 		return Project{}, fmt.Errorf("update project: %w", err)
 	}
 	return p, nil
+}
+
+// StartBuild transitions one of an Owner's Projects into the 'building' state and stamps
+// build_started_at, atomically and only if a build is not already in flight — the guard
+// that lets a caller reject a duplicate publish instead of starting a second concurrent
+// build (#49). It returns the updated Project on success, ErrBuildInProgress if the
+// Project is already 'building', and ErrProjectNotFound if it is not the Owner's (or
+// absent). Published is left untouched: a re-build of a published Project keeps it
+// playable at the old commit until a new build succeeds.
+func (s *Store) StartBuild(ctx context.Context, ownerID int64, id string) (Project, error) {
+	if !uuidRE.MatchString(id) {
+		return Project{}, ErrProjectNotFound
+	}
+	const q = `
+UPDATE projects
+SET build_state = 'building', build_error = NULL, build_started_at = now(), updated_at = now()
+WHERE id = $1 AND owner_id = $2 AND build_state <> 'building'
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, build_state, COALESCE(build_error, '') AS build_error, created_at, updated_at`
+	var p Project
+	err := s.pool.QueryRow(ctx, q, id, ownerID).
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.BuildState, &p.BuildError, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No row updated: either the Project isn't the Owner's (or is gone), or it is
+		// already 'building'. Disambiguate so the caller can return 404 vs 409.
+		if _, gerr := s.GetOwnerProject(ctx, ownerID, id); gerr != nil {
+			return Project{}, gerr // ErrProjectNotFound (or a real error)
+		}
+		return Project{}, ErrBuildInProgress
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("start build: %w", err)
+	}
+	return p, nil
+}
+
+// MarkBuildFailed records that the current build of one of an Owner's Projects failed,
+// settling build_state to 'failed' and storing a bounded error tail (#49). Published is
+// deliberately left untouched — a failed build never un-publishes, so a Project that was
+// already published stays playable at its previous commit. Owner-scoped: a cross-owner
+// or missing id affects no row and returns ErrProjectNotFound.
+func (s *Store) MarkBuildFailed(ctx context.Context, ownerID int64, id, buildError string) error {
+	if !uuidRE.MatchString(id) {
+		return ErrProjectNotFound
+	}
+	const q = `
+UPDATE projects SET build_state = 'failed', build_error = $3, updated_at = now()
+WHERE id = $1 AND owner_id = $2`
+	tag, err := s.pool.Exec(ctx, q, id, ownerID, buildError)
+	if err != nil {
+		return fmt.Errorf("mark build failed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+	return nil
 }

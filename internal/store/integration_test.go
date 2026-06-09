@@ -315,6 +315,105 @@ func TestUpdateProject(t *testing.T) {
 	}
 }
 
+// TestBuildLifecycle verifies the #49 build-state machine: StartBuild's conditional
+// 'building' transition (and its duplicate-build guard), MarkBuildFailed leaving
+// published untouched, PublishProject settling to 'published', and an edit resetting the
+// build state back to 'idle'.
+func TestBuildLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	alice, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+	bob, _ := s.UpsertOwnerByGitHubID(ctx, 200, "bob")
+
+	m1 := []byte(`{"Services":[{"Name":"web","Role":"ui"}]}`)
+	p, err := s.CreateProject(ctx, alice.ID, "app", m1)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if p.BuildState != "idle" || p.BuildError != "" {
+		t.Fatalf("a fresh Project should be idle with no error, got %+v", p)
+	}
+
+	// StartBuild transitions to 'building'; a second StartBuild while building is rejected
+	// (the duplicate-publish guard), and bob can't start a build on alice's Project.
+	building, err := s.StartBuild(ctx, alice.ID, p.ID)
+	if err != nil || building.BuildState != "building" {
+		t.Fatalf("StartBuild = (%+v, %v), want build_state=building", building, err)
+	}
+	if _, err := s.StartBuild(ctx, alice.ID, p.ID); !errors.Is(err, ErrBuildInProgress) {
+		t.Errorf("second StartBuild = %v, want ErrBuildInProgress", err)
+	}
+	if _, err := s.StartBuild(ctx, bob.ID, p.ID); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("cross-owner StartBuild = %v, want ErrProjectNotFound", err)
+	}
+
+	// A failed build records the error and state but never un-publishes (here it was
+	// never published, so it stays an unplayable draft).
+	if err := s.MarkBuildFailed(ctx, alice.ID, p.ID, "RUN npm ci failed"); err != nil {
+		t.Fatalf("MarkBuildFailed: %v", err)
+	}
+	failed, _ := s.GetOwnerProject(ctx, alice.ID, p.ID)
+	if failed.BuildState != "failed" || failed.BuildError != "RUN npm ci failed" || failed.Published {
+		t.Errorf("after a failed build: %+v", failed)
+	}
+	if _, err := s.GetPublishedProject(ctx, p.ID); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("a failed-build Project must not be playable, got %v", err)
+	}
+
+	// A successful publish settles to 'published' and clears the error; re-StartBuild is
+	// allowed now that it is no longer 'building'.
+	if _, err := s.StartBuild(ctx, alice.ID, p.ID); err != nil {
+		t.Fatalf("re-StartBuild after failure: %v", err)
+	}
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+		t.Fatalf("PublishProject: %v", err)
+	}
+	published, _ := s.GetOwnerProject(ctx, alice.ID, p.ID)
+	if published.BuildState != "published" || published.BuildError != "" || !published.Published || published.CommitSHA != sha {
+		t.Errorf("after publish: %+v", published)
+	}
+
+	// A failed RE-build of an already-published Project must NOT un-publish it: the old
+	// build keeps playing at its commit while build_state reports the failure. This is the
+	// load-bearing reason build_state is independent of published.
+	if _, err := s.StartBuild(ctx, alice.ID, p.ID); err != nil {
+		t.Fatalf("re-StartBuild on a published Project: %v", err)
+	}
+	if err := s.MarkBuildFailed(ctx, alice.ID, p.ID, "rebuild blew up"); err != nil {
+		t.Fatalf("MarkBuildFailed on a published Project: %v", err)
+	}
+	rebuilt, _ := s.GetOwnerProject(ctx, alice.ID, p.ID)
+	if !rebuilt.Published || rebuilt.BuildState != "failed" || rebuilt.CommitSHA != sha {
+		t.Errorf("a failed re-build must keep the Project published at its old commit: %+v", rebuilt)
+	}
+	if playable, err := s.GetPublishedProject(ctx, p.ID); err != nil || playable.CommitSHA != sha {
+		t.Errorf("a failed re-build must keep the Project playable at %q, got (%+v, %v)", sha, playable, err)
+	}
+	// Re-publish settles it back to 'published' so the edit step below starts from a clean
+	// published state.
+	if _, err := s.StartBuild(ctx, alice.ID, p.ID); err != nil {
+		t.Fatalf("re-StartBuild before re-publish: %v", err)
+	}
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+		t.Fatalf("re-publish: %v", err)
+	}
+
+	// Editing the manifest returns the build state to 'idle' (the #51/#49 reconciliation).
+	m2 := []byte(`{"Services":[{"Name":"web","Role":"ui"},{"Name":"api","Role":"api","PathPrefix":"/api"}]}`)
+	edited, err := s.UpdateProject(ctx, alice.ID, p.ID, "app", m2)
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if edited.BuildState != "idle" || edited.BuildError != "" || edited.Published || edited.CommitSHA != "" {
+		t.Errorf("editing the manifest must reset the build lifecycle to idle: %+v", edited)
+	}
+}
+
 // A migration file edited after being applied must be rejected (append-only).
 func TestMigrateRejectsModifiedMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

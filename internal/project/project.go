@@ -40,6 +40,8 @@ type Store interface {
 	UpdateProject(ctx context.Context, ownerID int64, id, name string, manifest []byte) (store.Project, error)
 	GetOwnerProject(ctx context.Context, ownerID int64, id string) (store.Project, error)
 	ListProjectsByOwner(ctx context.Context, ownerID int64) ([]store.Project, error)
+	StartBuild(ctx context.Context, ownerID int64, id string) (store.Project, error)
+	MarkBuildFailed(ctx context.Context, ownerID int64, id, buildError string) error
 	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error
 	OwnerByUsername(ctx context.Context, username string) (store.Owner, error)
 	ListPublishedProjectsByUsername(ctx context.Context, username string) ([]store.Project, error)
@@ -216,10 +218,12 @@ func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 
 // Publish builds the signed-in Owner's Project from source and, on success, marks it
 // published at the built commit (ADR-0003: build at publish, run from cache). It is
-// synchronous — the Owner waits for the build — and must be mounted behind
+// synchronous — the Owner waits for the build — and records the build lifecycle on the
+// Project as it goes (building → published|failed, #49). Must be mounted behind
 // RequireOwner with an {id} path value. 404 if the Project is not theirs, 501 if
-// publishing is not configured (no GitHub App credentials), 422 if the repo is not
-// theirs / not a single repo / fails to build, 200 with the published view on success.
+// publishing is not configured (no GitHub App credentials), 409 if a build is already in
+// flight, 422 if the repo is not theirs / not a single repo / fails to build, 200 with
+// the published view on success.
 func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 	owner, ok := auth.OwnerFrom(r.Context())
 	if !ok {
@@ -247,31 +251,61 @@ func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 	}
 	// Security: an Owner may only publish their OWN repositories, and (MVP) every
 	// service must come from one repository so a single commit pins the whole Project.
+	// Checked before marking the build started, so a rejected repo never enters 'building'.
 	if err := checkOwnerRepos(owner.GitHubLogin, m); err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
 
+	// Transition to 'building' first — this also rejects a duplicate publish (409) while a
+	// build is already in flight, so only one build of a Project runs at a time (#49).
+	if _, err := h.store.StartBuild(r.Context(), owner.ID, p.ID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrBuildInProgress):
+			http.Error(w, "a build is already in progress for this project", http.StatusConflict)
+		case errors.Is(err, store.ErrProjectNotFound):
+			http.Error(w, "project not found", http.StatusNotFound)
+		default:
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// Settle writes use a cancel-resistant context: the build may have failed BECAUSE the
+	// Owner disconnected mid-build (the request is synchronous and slow), and a settle that
+	// ran on the cancelled request context would itself fail — leaving the row stuck in
+	// 'building', where every retry 409s. This mirrors the codebase's after-failure writes
+	// (migrate.go's advisory unlock, the reaper's teardown, compose.go's Teardown).
+	settleCtx := context.WithoutCancel(r.Context())
+
 	commitSHA, err := h.builder.BuildProject(r.Context(), owner.GitHubLogin, p.ID, m)
 	if err != nil {
-		// A repo the App can't reach is an actionable, terse message; any other
-		// failure returns a bounded build log (the build runs the Owner's own code, so
-		// its output carries no platform secret — the clone layer already redacts the
-		// token from its errors).
+		// A repo the App can't reach is an actionable, terse message; any other failure
+		// returns a bounded build log (the build runs the Owner's own code, so its output
+		// carries no platform secret — the clone layer already redacts the token from its
+		// errors). The same message is recorded as the build error the Owner can read back.
+		msg := "build failed:\n" + lastBytes(err.Error(), 4<<10)
 		if errors.Is(err, githubapp.ErrNoInstallation) {
-			http.Error(w, "the Showcase GitHub App is not installed on that repository", http.StatusUnprocessableEntity)
-			return
+			msg = "the Showcase GitHub App is not installed on that repository"
 		}
-		http.Error(w, "build failed:\n"+lastBytes(err.Error(), 4<<10), http.StatusUnprocessableEntity)
+		_ = h.store.MarkBuildFailed(settleCtx, owner.ID, p.ID, msg)
+		http.Error(w, msg, http.StatusUnprocessableEntity)
 		return
 	}
 
 	if err := h.store.PublishProject(r.Context(), owner.ID, p.ID, commitSHA); err != nil {
+		// The build succeeded but recording the publish failed; settle out of 'building' so
+		// the Owner can retry (a retry rebuilds from cache, so it is cheap) rather than
+		// being wedged at 409. published/commit_sha are untouched (PublishProject is atomic),
+		// so a previously-published version keeps playing.
+		_ = h.store.MarkBuildFailed(settleCtx, owner.ID, p.ID, "build succeeded but publishing failed; please retry")
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	p.Published = true
 	p.CommitSHA = commitSHA
+	p.BuildState = "published"
+	p.BuildError = ""
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(projectView(p))
 }
@@ -343,19 +377,22 @@ func lastBytes(s string, max int) string {
 	return "…" + s[len(s)-max:]
 }
 
-// projectView is the JSON shape returned for a Project: its identity, publish state,
-// the built commit (once published), and the stored run contract echoed back as an
-// editable Form under "manifest" so the edit UI can round-trip it (#51). The Form's
+// projectView is the JSON shape returned for a Project: its identity, publish state, the
+// build lifecycle (buildState/buildError, #49), the built commit (once published), and
+// the stored run contract echoed back as an editable Form under "manifest" so the edit
+// UI can round-trip it (#51). The Form's
 // Name is set from the Project name (it is a column, not a manifest field). The stored
 // manifest is canonical, validated JSON (the write path Marshals a Validated
 // runcontract.Manifest), so the decode does not fail in practice; if it ever did, the
 // manifest is omitted rather than failing the whole view (e.g. a List of many projects).
 func projectView(p store.Project) map[string]any {
 	v := map[string]any{
-		"id":        p.ID,
-		"name":      p.Name,
-		"published": p.Published,
-		"commitSha": p.CommitSHA,
+		"id":         p.ID,
+		"name":       p.Name,
+		"published":  p.Published,
+		"commitSha":  p.CommitSHA,
+		"buildState": p.BuildState,
+		"buildError": p.BuildError,
 	}
 	var m runcontract.Manifest
 	if err := json.Unmarshal(p.Manifest, &m); err == nil {
