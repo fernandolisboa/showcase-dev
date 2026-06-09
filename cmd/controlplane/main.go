@@ -82,6 +82,7 @@ func main() {
 	// 501 — the dev loop runs without a real App.
 	var authn *auth.Authenticator
 	var projects *project.Handlers // built below, once the image builder exists
+	var publisher *project.Publisher
 	if dbStore != nil {
 		var provider auth.IdentityProvider
 		if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {
@@ -250,7 +251,13 @@ func main() {
 				return sha, nil
 			})
 		}
-		projects = project.NewHandlers(dbStore, pb)
+		// The Publisher runs publish builds on a background goroutine (#49) so the Owner's
+		// request returns immediately; it settles build_state when the build finishes and
+		// is drained at shutdown. nil builder => nil publisher => publish reports 501.
+		if pb != nil {
+			publisher = project.NewPublisher(dbStore, pb, logger)
+		}
+		projects = project.NewHandlers(dbStore, publisher)
 	}
 
 	// The Runner boots Sessions and keeps the proxy registry current; the session
@@ -303,6 +310,23 @@ func main() {
 	}()
 	logger.Info("session reaper started", "idle", cfg.IdleTimeout, "max_runtime", cfg.MaxRuntime, "interval", cfg.ReaperInterval)
 
+	// Recover Projects stranded in 'building' by a crash or restart mid-build (#49): sweep
+	// once at startup (reclaiming the previous process's interrupted builds) and then
+	// periodically. Runs for the process lifetime, cancelled at shutdown.
+	if publisher != nil {
+		buildReapCtx, stopBuildReap := context.WithCancel(context.Background())
+		buildReapDone := make(chan struct{})
+		go func() {
+			defer close(buildReapDone)
+			publisher.ReapStuckBuilds(buildReapCtx, cfg.BuildTimeout, cfg.BuildReapGrace)
+		}()
+		defer func() {
+			stopBuildReap()
+			<-buildReapDone
+		}()
+		logger.Info("build recovery sweep started", "per_service_timeout", cfg.BuildTimeout, "grace", cfg.BuildReapGrace)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
 		Handler:           server.New(logger, cfg, session.PlayHandler(sessions, fixtureProjectID), ready, authn, projects),
@@ -313,7 +337,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, stop, logger, srv, sessions, cfg.Addr(), cfg.Env); err != nil {
+	if err := run(ctx, stop, logger, srv, sessions, publisher, cfg.Addr(), cfg.Env); err != nil {
 		os.Exit(1)
 	}
 }
@@ -394,7 +418,7 @@ func pruneLoginSessions(ctx context.Context, st *store.Store, logger *slog.Logge
 // shuts down gracefully. It returns a non-nil error when the server failed to
 // run — a failed bind (port in use) must surface as a non-zero exit, otherwise a
 // control plane that never came up looks like a clean start to a supervisor.
-func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv *http.Server, sessions *session.Manager, addr, env string) error {
+func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv *http.Server, sessions *session.Manager, publisher *project.Publisher, addr, env string) error {
 	// serveErr carries a fatal listen error back to the main path. It is buffered
 	// so the goroutine never blocks, and the send happens-before stop(), which the
 	// <-ctx.Done() below synchronizes on.
@@ -424,6 +448,14 @@ func run(ctx context.Context, stop context.CancelFunc, logger *slog.Logger, srv 
 	// (ADR-0006). Bounded by the same shutdown deadline.
 	if err := sessions.Shutdown(shutdownCtx); err != nil {
 		logger.Error("session drain incomplete", "err", err)
+	}
+
+	// Likewise cancel and drain any in-flight publish builds: an aborted build cleans up
+	// its sandbox and is left in 'building' for the startup recovery sweep to reclaim (#49).
+	if publisher != nil {
+		if err := publisher.Shutdown(shutdownCtx); err != nil {
+			logger.Error("publisher drain incomplete", "err", err)
+		}
 	}
 
 	// A signal-driven shutdown is success; a shutdown forced by a server error is not.

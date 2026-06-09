@@ -85,6 +85,9 @@ func (noopProjectStore) StartBuild(context.Context, int64, string) (store.Projec
 }
 func (noopProjectStore) MarkBuildFailed(context.Context, int64, string, string) error { return nil }
 func (noopProjectStore) PublishProject(context.Context, int64, string, string) error  { return nil }
+func (noopProjectStore) ReclaimStuckBuilds(context.Context, time.Duration, time.Duration) (int64, error) {
+	return 0, nil
+}
 func (noopProjectStore) OwnerByUsername(context.Context, string) (store.Owner, error) {
 	return store.Owner{}, store.ErrNotFound
 }

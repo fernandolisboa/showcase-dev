@@ -243,6 +243,36 @@ RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS c
 	return p, nil
 }
 
+// ReclaimStuckBuilds settles Projects stranded in build_state='building' back to 'failed'
+// so the Owner can retry — a build interrupted by a crash or a process restart mid-build,
+// whose in-process goroutine no longer exists to settle it (#49). Each Project's staleness
+// window is computed from its OWN service count — (serviceCount+1)*perServiceTimeout, the
+// same bound publish enforces — plus grace, so a live build is never reclaimed no matter
+// how many services it declares, while a stranded one is recovered shortly after its
+// bound. NOT owner-scoped: it sweeps every Owner's Projects. published is left untouched
+// (a stranded re-build of a published Project keeps the old build playable). Returns how
+// many rows it reclaimed.
+func (s *Store) ReclaimStuckBuilds(ctx context.Context, perServiceTimeout, grace time.Duration) (int64, error) {
+	// jsonb_array_length(manifest->'Services') is each Project's declared service count
+	// (the manifest is the canonical encoding of runcontract.Manifest, whose Services field
+	// serializes as "Services"); COALESCE to 1 guards the impossible null case. A 'building'
+	// row always has build_started_at set by StartBuild.
+	const q = `
+UPDATE projects
+SET build_state = 'failed',
+    build_error = 'the build did not finish (the server restarted or the build was interrupted) — please retry',
+    updated_at  = now()
+WHERE build_state = 'building'
+  AND build_started_at IS NOT NULL
+  AND build_started_at < now() - make_interval(secs =>
+        (COALESCE(jsonb_array_length(manifest -> 'Services'), 1) + 1) * $1 + $2)`
+	tag, err := s.pool.Exec(ctx, q, perServiceTimeout.Seconds(), grace.Seconds())
+	if err != nil {
+		return 0, fmt.Errorf("reclaim stuck builds: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // StartBuild transitions one of an Owner's Projects into the 'building' state and stamps
 // build_started_at, atomically and only if a build is not already in flight — the guard
 // that lets a caller reject a duplicate publish instead of starting a second concurrent
