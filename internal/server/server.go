@@ -60,11 +60,15 @@ func New(logger *slog.Logger, _ config.Config, play http.Handler, ready func(con
 			mux.Handle("GET /api/owner/projects/{id}", authn.RequireOwner(http.HandlerFunc(projects.Get)))
 			// Editing replaces the run contract; changing it returns the Project to draft (#51).
 			mux.Handle("PUT /api/owner/projects/{id}", authn.RequireOwner(http.HandlerFunc(projects.Update)))
+			// The per-Project URL slug (editable; does not affect publish state, #51).
+			mux.Handle("PUT /api/owner/projects/{id}/slug", authn.RequireOwner(http.HandlerFunc(projects.SetSlug)))
 			// Publishing builds the Project from source and marks it playable (#19).
 			mux.Handle("POST /api/owner/projects/{id}/publish", authn.RequireOwner(http.HandlerFunc(projects.Publish)))
 			// The Portfolio is PUBLIC (a Guest browses showcase.dev/{username}), so it
 			// is NOT gated — it lists only published Projects (AC4, ADR-0005).
 			mux.Handle("GET /api/portfolio/{username}", http.HandlerFunc(projects.Portfolio))
+			// PUBLIC resolution of /{username}/{slug} to a published Project for play (#51).
+			mux.Handle("GET /api/portfolio/{username}/{slug}", http.HandlerFunc(projects.ProjectBySlug))
 		}
 	}
 

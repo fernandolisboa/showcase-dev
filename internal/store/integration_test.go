@@ -520,6 +520,70 @@ func TestPublishServiceCommits(t *testing.T) {
 	}
 }
 
+// TestProjectSlug verifies the #51 per-Project slug: set/clear, per-owner uniqueness,
+// owner scoping, and the public resolve-by-slug path (published-only).
+func TestProjectSlug(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	alice, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+	bob, _ := s.UpsertOwnerByGitHubID(ctx, 200, "bob")
+	if err := s.SetUsername(ctx, alice.ID, "alice-dev"); err != nil {
+		t.Fatalf("set username: %v", err)
+	}
+
+	m := []byte(`{"Services":[{"Name":"web","Role":"ui"}]}`)
+	p1, _ := s.CreateProject(ctx, alice.ID, "one", m)
+	p2, _ := s.CreateProject(ctx, alice.ID, "two", m)
+
+	if err := s.SetProjectSlug(ctx, alice.ID, p1.ID, "app"); err != nil {
+		t.Fatalf("set slug: %v", err)
+	}
+	if got, _ := s.GetOwnerProject(ctx, alice.ID, p1.ID); got.Slug != "app" {
+		t.Errorf("slug not persisted: %q", got.Slug)
+	}
+	// Per-owner unique: p2 can't reuse "app"; cross-owner set affects no row.
+	if err := s.SetProjectSlug(ctx, alice.ID, p2.ID, "app"); !errors.Is(err, ErrProjectSlugTaken) {
+		t.Errorf("duplicate slug = %v, want ErrProjectSlugTaken", err)
+	}
+	if err := s.SetProjectSlug(ctx, bob.ID, p1.ID, "x"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("cross-owner set slug = %v, want ErrProjectNotFound", err)
+	}
+
+	// Resolve-by-slug is published-only: a draft does not resolve.
+	if _, err := s.GetPublishedProjectBySlug(ctx, "alice-dev", "app"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("draft resolve = %v, want ErrProjectNotFound", err)
+	}
+	if _, err := s.StartBuild(ctx, alice.ID, p1.ID); err != nil {
+		t.Fatalf("StartBuild: %v", err)
+	}
+	if err := s.PublishProject(ctx, alice.ID, p1.ID, "sha", nil); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	got, err := s.GetPublishedProjectBySlug(ctx, "alice-dev", "app")
+	if err != nil || got.ID != p1.ID {
+		t.Fatalf("resolve published by slug = (%+v, %v), want p1", got, err)
+	}
+	if _, err := s.GetPublishedProjectBySlug(ctx, "alice-dev", "nope"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("unknown slug = %v, want ErrProjectNotFound", err)
+	}
+
+	// Clearing a slug is allowed, frees the name, and stops resolving; two NULL slugs do
+	// not collide (Postgres treats NULLs as distinct under the unique constraint).
+	if err := s.SetProjectSlug(ctx, alice.ID, p1.ID, ""); err != nil {
+		t.Fatalf("clear slug: %v", err)
+	}
+	if _, err := s.GetPublishedProjectBySlug(ctx, "alice-dev", "app"); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("a cleared slug must stop resolving, got %v", err)
+	}
+	if err := s.SetProjectSlug(ctx, alice.ID, p2.ID, ""); err != nil {
+		t.Errorf("a second NULL slug must not collide: %v", err)
+	}
+}
+
 // A migration file edited after being applied must be rejected (append-only).
 func TestMigrateRejectsModifiedMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

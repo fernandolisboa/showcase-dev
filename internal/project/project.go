@@ -45,8 +45,10 @@ type Store interface {
 	MarkBuildFailed(ctx context.Context, ownerID int64, id, buildError string) error
 	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string, serviceCommits []byte) error
 	ReclaimStuckBuilds(ctx context.Context, perServiceTimeout, grace time.Duration) (int64, error)
+	SetProjectSlug(ctx context.Context, ownerID int64, id, slug string) error
 	OwnerByUsername(ctx context.Context, username string) (store.Owner, error)
 	ListPublishedProjectsByUsername(ctx context.Context, username string) ([]store.Project, error)
+	GetPublishedProjectBySlug(ctx context.Context, username, slug string) (store.Project, error)
 }
 
 // ProjectBuilder builds every service of a Project's manifest from source at publish,
@@ -316,7 +318,8 @@ func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 // (ADR-0005, AC4) — ungated, since a Portfolio is public. 404 if no Owner has
 // claimed the username (reserved names are never claimable, so they 404 here too);
 // otherwise the Owner's public identity plus their published Projects (possibly an
-// empty list). Each Project carries only id + name — enough for a Guest to play it.
+// empty list). Each Project carries id + name + slug — enough for a Guest to play it (by
+// id) and for the client to build /{username}/{slug} links (#51).
 func (h *Handlers) Portfolio(w http.ResponseWriter, r *http.Request) {
 	username := strings.ToLower(strings.TrimSpace(r.PathValue("username")))
 	owner, err := h.store.OwnerByUsername(r.Context(), username)
@@ -335,13 +338,91 @@ func (h *Handlers) Portfolio(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]map[string]any, 0, len(projects))
 	for _, p := range projects {
-		views = append(views, map[string]any{"id": p.ID, "name": p.Name})
+		// id (play by UUID) + name + slug (so the client can build /{username}/{slug} links, #51).
+		views = append(views, map[string]any{"id": p.ID, "name": p.Name, "slug": p.Slug})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"owner":    map[string]any{"username": owner.Username},
 		"projects": views,
 	})
+}
+
+// SetSlug sets (or, with an empty slug, clears) the URL slug of the signed-in Owner's
+// Project (#51). Body: {"slug":"..."}. The slug is editable; changing it does not affect
+// publish state (a slug is a URL alias, not build config). 400 on a bad body or an invalid/
+// reserved slug, 404 if the Project is not theirs, 409 if the slug is taken by another of
+// their Projects, 200 with the updated view. Must be mounted behind RequireOwner with an
+// {id} path value.
+func (h *Handlers) SetSlug(w http.ResponseWriter, r *http.Request) {
+	owner, ok := auth.OwnerFrom(r.Context())
+	if !ok {
+		http.Error(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
+	dec.DisallowUnknownFields()
+	var body struct {
+		Slug string `json:"slug"`
+	}
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	canonical := ""
+	if strings.TrimSpace(body.Slug) != "" {
+		c, err := CanonicalSlug(body.Slug)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		canonical = c
+	}
+
+	id := r.PathValue("id")
+	switch err := h.store.SetProjectSlug(r.Context(), owner.ID, id, canonical); {
+	case errors.Is(err, store.ErrProjectNotFound):
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	case errors.Is(err, store.ErrProjectSlugTaken):
+		http.Error(w, "a project with that slug already exists", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Re-read to echo the updated view. SetProjectSlug returns only an error (it touches no
+	// other state), so this is a deliberate second read rather than a RETURNING.
+	p, err := h.store.GetOwnerProject(r.Context(), owner.ID, id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(projectView(p))
+}
+
+// ProjectBySlug is the PUBLIC resolution of /{username}/{slug} to a published Project
+// (#51) — ungated, like the Portfolio. It returns just id + name + slug (enough for a Guest
+// to play by id and display it), keeping /api/play strictly id-based so a non-UUID slug
+// never reaches the play path. 404 if the username/slug does not resolve to a published
+// Project (no draft/existence oracle).
+func (h *Handlers) ProjectBySlug(w http.ResponseWriter, r *http.Request) {
+	username := strings.ToLower(strings.TrimSpace(r.PathValue("username")))
+	slug := strings.ToLower(strings.TrimSpace(r.PathValue("slug")))
+	p, err := h.store.GetPublishedProjectBySlug(r.Context(), username, slug)
+	switch {
+	case errors.Is(err, store.ErrProjectNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	case err != nil:
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": p.ID, "name": p.Name, "slug": p.Slug})
 }
 
 // checkRepoAccess is the publish authorization gate (#50): every service's repo must be one
@@ -400,6 +481,7 @@ func projectView(p store.Project) map[string]any {
 	v := map[string]any{
 		"id":         p.ID,
 		"name":       p.Name,
+		"slug":       p.Slug,
 		"published":  p.Published,
 		"commitSha":  p.CommitSHA,
 		"buildState": p.BuildState,
