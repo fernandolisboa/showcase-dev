@@ -37,6 +37,7 @@ const maxBody = 64 << 10
 // auth.SessionStore.
 type Store interface {
 	CreateProject(ctx context.Context, ownerID int64, name string, manifest []byte) (store.Project, error)
+	UpdateProject(ctx context.Context, ownerID int64, id, name string, manifest []byte) (store.Project, error)
 	GetOwnerProject(ctx context.Context, ownerID int64, id string) (store.Project, error)
 	ListProjectsByOwner(ctx context.Context, ownerID int64) ([]store.Project, error)
 	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error
@@ -77,32 +78,8 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
-	dec.DisallowUnknownFields()
-	var form Form
-	if err := dec.Decode(&form); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	name := strings.TrimSpace(form.Name)
-	if name == "" || utf8.RuneCountInString(name) > maxNameLen {
-		http.Error(w, fmt.Sprintf("name is required and must be at most %d characters", maxNameLen), http.StatusBadRequest)
-		return
-	}
-
-	manifest, err := form.toManifest()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := manifest.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	name, encoded, ok := decodeProjectForm(w, r)
+	if !ok {
 		return
 	}
 
@@ -118,6 +95,81 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(projectView(p))
+}
+
+// decodeProjectForm reads a Form request body (the shape Create and Update both accept),
+// validates the name, and maps the form to a runcontract.Manifest, validating it with
+// the contract's own Validate (the single source of manifest validation). It returns the
+// trimmed name and the canonical manifest encoding to persist. On any problem it writes
+// the HTTP error response (400 for a bad body / invalid manifest, 500 for an encode
+// failure) and returns ok=false, so the caller simply returns.
+func decodeProjectForm(w http.ResponseWriter, r *http.Request) (name string, encoded []byte, ok bool) {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody))
+	dec.DisallowUnknownFields()
+	var form Form
+	if err := dec.Decode(&form); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return "", nil, false
+	}
+
+	name = strings.TrimSpace(form.Name)
+	if name == "" || utf8.RuneCountInString(name) > maxNameLen {
+		http.Error(w, fmt.Sprintf("name is required and must be at most %d characters", maxNameLen), http.StatusBadRequest)
+		return "", nil, false
+	}
+
+	manifest, err := form.toManifest()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", nil, false
+	}
+	if err := manifest.Validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return "", nil, false
+	}
+	encoded, err = json.Marshal(manifest)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return "", nil, false
+	}
+	return name, encoded, true
+}
+
+// Update replaces the signed-in Owner's Project configuration (name + manifest). Body: a
+// Form (JSON), the same shape Create accepts. It re-maps and re-validates the manifest,
+// then replaces it; editing the manifest returns a published Project to draft (the
+// published flag and the pinned commit are cleared — the Owner re-publishes to rebuild,
+// #51), while a pure rename keeps it published. 400 on a bad body or invalid manifest,
+// 404 if the Project is not theirs (or absent), 409 if the new name collides with another
+// of their Projects, 200 with the updated view. Must be mounted behind RequireOwner with
+// an {id} path value.
+func (h *Handlers) Update(w http.ResponseWriter, r *http.Request) {
+	owner, ok := auth.OwnerFrom(r.Context())
+	if !ok {
+		http.Error(w, "not signed in", http.StatusUnauthorized)
+		return
+	}
+
+	name, encoded, ok := decodeProjectForm(w, r)
+	if !ok {
+		return
+	}
+
+	p, err := h.store.UpdateProject(r.Context(), owner.ID, r.PathValue("id"), name, encoded)
+	switch {
+	case errors.Is(err, store.ErrProjectNotFound):
+		http.Error(w, "project not found", http.StatusNotFound)
+		return
+	case errors.Is(err, store.ErrProjectNameTaken):
+		http.Error(w, "a project with that name already exists", http.StatusConflict)
+		return
+	case err != nil:
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(projectView(p))
 }
 

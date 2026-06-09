@@ -250,6 +250,71 @@ func TestProjectRoundTripAndOwnership(t *testing.T) {
 	}
 }
 
+// TestUpdateProject verifies the edit semantics (#51): a pure rename keeps a published
+// Project live, but editing the manifest returns it to draft (published cleared, commit
+// dropped), all owner-scoped, with the per-owner unique-name guard.
+func TestUpdateProject(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	alice, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+	bob, _ := s.UpsertOwnerByGitHubID(ctx, 200, "bob")
+
+	m1 := []byte(`{"Services":[{"Name":"web","Role":"ui"}]}`)
+	p, err := s.CreateProject(ctx, alice.ID, "site", m1)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	// A pure rename (manifest re-encoded but semantically identical) stays published at
+	// the same commit — exercises the jsonb IS DISTINCT FROM "no change" path.
+	renamed, err := s.UpdateProject(ctx, alice.ID, p.ID, "site-renamed", m1)
+	if err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if renamed.Name != "site-renamed" || !renamed.Published || renamed.CommitSHA != sha {
+		t.Errorf("a pure rename should stay published at the same commit: %+v", renamed)
+	}
+
+	// Editing the manifest returns the Project to draft and drops the pinned commit, so a
+	// Guest can no longer play the now-stale build.
+	m2 := []byte(`{"Services":[{"Name":"web","Role":"ui"},{"Name":"api","Role":"api","PathPrefix":"/api"}]}`)
+	edited, err := s.UpdateProject(ctx, alice.ID, p.ID, "site-renamed", m2)
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if edited.Published || edited.CommitSHA != "" {
+		t.Errorf("editing the manifest must unpublish and drop the commit: %+v", edited)
+	}
+	if _, err := s.GetPublishedProject(ctx, p.ID); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("an edited Project must no longer be playable, got %v", err)
+	}
+
+	// Owner-scoped: bob cannot update alice's Project (no row affected → not found); a
+	// non-uuid id is not-found, not a 500.
+	if _, err := s.UpdateProject(ctx, bob.ID, p.ID, "x", m1); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("cross-owner update = %v, want ErrProjectNotFound", err)
+	}
+	if _, err := s.UpdateProject(ctx, alice.ID, "not-a-uuid", "x", m1); !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("non-uuid update = %v, want ErrProjectNotFound", err)
+	}
+
+	// Per-owner unique name: renaming p onto another of alice's Projects collides.
+	if _, err := s.CreateProject(ctx, alice.ID, "other", m1); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	if _, err := s.UpdateProject(ctx, alice.ID, p.ID, "other", m1); !errors.Is(err, ErrProjectNameTaken) {
+		t.Errorf("rename onto an existing name = %v, want ErrProjectNameTaken", err)
+	}
+}
+
 // A migration file edited after being applied must be rejected (append-only).
 func TestMigrateRejectsModifiedMigration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)

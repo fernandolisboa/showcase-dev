@@ -183,3 +183,45 @@ WHERE id = $1 AND owner_id = $2`
 	}
 	return nil
 }
+
+// UpdateProject replaces the name and manifest of one of an Owner's Projects. When the
+// manifest actually changes it returns the Project to draft — published is cleared and
+// the pinned commit_sha dropped — so a stale build can never outlive an edited run
+// contract (#51: the Owner re-publishes to rebuild). A pure rename (manifest unchanged)
+// keeps the Project published at its commit. Owner-scoped: a cross-owner or missing id
+// affects no row and returns ErrProjectNotFound; a name another of the Owner's Projects
+// already uses surfaces as ErrProjectNameTaken (the per-owner UNIQUE). manifest must
+// already be a validated, canonical JSON encoding (the project layer maps the Owner form
+// and Validates it before calling).
+func (s *Store) UpdateProject(ctx context.Context, ownerID int64, id, name string, manifest []byte) (Project, error) {
+	if !uuidRE.MatchString(id) {
+		return Project{}, ErrProjectNotFound
+	}
+	// The published/commit_sha reset is conditional on the manifest actually changing,
+	// evaluated in one statement against the OLD row (an UPDATE's SET expressions see the
+	// pre-update values) so a reader never observes a half-applied edit. jsonb IS DISTINCT
+	// FROM compares semantically, so re-encoding the same content counts as no change.
+	const q = `
+UPDATE projects
+SET name = $3,
+    manifest = $4,
+    published = CASE WHEN manifest IS DISTINCT FROM $4 THEN false ELSE published END,
+    commit_sha = CASE WHEN manifest IS DISTINCT FROM $4 THEN NULL ELSE commit_sha END,
+    updated_at = now()
+WHERE id = $1 AND owner_id = $2
+RETURNING id, owner_id, name, manifest, published, COALESCE(commit_sha, '') AS commit_sha, created_at, updated_at`
+	var p Project
+	err := s.pool.QueryRow(ctx, q, id, ownerID, name, manifest).
+		Scan(&p.ID, &p.OwnerID, &p.Name, &p.Manifest, &p.Published, &p.CommitSHA, &p.CreatedAt, &p.UpdatedAt)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+		return Project{}, ErrProjectNameTaken
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Project{}, ErrProjectNotFound
+	}
+	if err != nil {
+		return Project{}, fmt.Errorf("update project: %w", err)
+	}
+	return p, nil
+}
