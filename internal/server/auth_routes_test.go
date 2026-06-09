@@ -71,6 +71,9 @@ type noopProjectStore struct{}
 func (noopProjectStore) CreateProject(context.Context, int64, string, []byte) (store.Project, error) {
 	return store.Project{}, nil
 }
+func (noopProjectStore) UpdateProject(context.Context, int64, string, string, []byte) (store.Project, error) {
+	return store.Project{}, store.ErrProjectNotFound
+}
 func (noopProjectStore) GetOwnerProject(context.Context, int64, string) (store.Project, error) {
 	return store.Project{}, store.ErrProjectNotFound
 }

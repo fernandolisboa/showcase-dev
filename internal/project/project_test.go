@@ -69,6 +69,29 @@ func (f *fakeStore) CreateProject(_ context.Context, ownerID int64, name string,
 	return p, nil
 }
 
+func (f *fakeStore) UpdateProject(_ context.Context, ownerID int64, id, name string, manifest []byte) (store.Project, error) {
+	// Per-owner unique name: renaming onto another of this Owner's Projects collides.
+	for _, p := range f.byOwner[ownerID] {
+		if p.Name == name && p.ID != id {
+			return store.Project{}, store.ErrProjectNameTaken
+		}
+	}
+	for i := range f.byOwner[ownerID] {
+		if f.byOwner[ownerID][i].ID == id {
+			// Editing the manifest returns the Project to draft (mirrors the store's
+			// conditional reset); a pure rename keeps it published.
+			if !bytes.Equal(f.byOwner[ownerID][i].Manifest, manifest) {
+				f.byOwner[ownerID][i].Published = false
+				f.byOwner[ownerID][i].CommitSHA = ""
+			}
+			f.byOwner[ownerID][i].Name = name
+			f.byOwner[ownerID][i].Manifest = manifest
+			return f.byOwner[ownerID][i], nil
+		}
+	}
+	return store.Project{}, store.ErrProjectNotFound
+}
+
 func (f *fakeStore) GetOwnerProject(_ context.Context, ownerID int64, id string) (store.Project, error) {
 	if f.failGet {
 		return store.Project{}, errors.New("boom")
@@ -454,6 +477,136 @@ func TestPublishRequiresOwner(t *testing.T) {
 	h.Publish(rec, r)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("publish without an Owner = %d, want 401", rec.Code)
+	}
+}
+
+func update(t *testing.T, h *Handlers, id string, body any, owner store.Owner) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := request(t, http.MethodPut, "/api/owner/projects/"+id, body, owner)
+	r.SetPathValue("id", id)
+	h.Update(rec, r)
+	return rec
+}
+
+func TestUpdateReplacesManifest(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	id := createProject(t, h, validForm(), owner)
+
+	edited := validForm()
+	edited.Services[0].Port = 3000 // change the manifest
+	rec := update(t, h, id, edited, owner)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d, body=%s", rec.Code, rec.Body)
+	}
+	var got struct {
+		Manifest Form `json:"manifest"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if len(got.Manifest.Services) != 1 || got.Manifest.Services[0].Port != 3000 {
+		t.Errorf("update did not replace the manifest: %+v", got.Manifest.Services)
+	}
+}
+
+func TestUpdateUnpublishesWhenManifestChanges(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, &fakeBuilder{commit: "abc123"})
+	owner := store.Owner{ID: 1, GitHubLogin: "me"} // validForm's repo is github.com/me/blog
+	id := createProject(t, h, validForm(), owner)
+	if rec := publish(t, h, id, owner); rec.Code != http.StatusOK {
+		t.Fatalf("publish setup = %d, body=%s", rec.Code, rec.Body)
+	}
+
+	edited := validForm()
+	edited.Services[0].Port = 3000 // a real manifest change
+	rec := update(t, h, id, edited, owner)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d, body=%s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got["published"] != false || got["commitSha"] != "" {
+		t.Errorf("editing the manifest must return the Project to draft, got %v", got)
+	}
+	if stored := fs.byOwner[1][0]; stored.Published || stored.CommitSHA != "" {
+		t.Errorf("draft reset not persisted: %+v", stored)
+	}
+}
+
+func TestUpdatePureRenameKeepsPublished(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, &fakeBuilder{commit: "abc123"})
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), owner)
+	if rec := publish(t, h, id, owner); rec.Code != http.StatusOK {
+		t.Fatalf("publish setup = %d, body=%s", rec.Code, rec.Body)
+	}
+
+	renamed := validForm() // identical services → manifest unchanged
+	renamed.Name = "blog-renamed"
+	rec := update(t, h, id, renamed, owner)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update = %d, body=%s", rec.Code, rec.Body)
+	}
+	var got map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&got)
+	if got["name"] != "blog-renamed" || got["published"] != true || got["commitSha"] != "abc123" {
+		t.Errorf("a pure rename must stay published at the same commit, got %v", got)
+	}
+}
+
+func TestUpdateCrossOwnerIs404(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	alice, bob := store.Owner{ID: 1}, store.Owner{ID: 2}
+	id := createProject(t, h, validForm(), alice)
+
+	if rec := update(t, h, id, validForm(), bob); rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner update = %d, want 404 (no IDOR)", rec.Code)
+	}
+}
+
+func TestUpdateInvalidManifestIsRejected(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	id := createProject(t, h, validForm(), owner)
+
+	bad := validForm()
+	bad.Services[0].Role = "api" // no ui service left → Validate fails
+	bad.Services[0].PathPrefix = "/api"
+	rec := update(t, h, id, bad, owner)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("update with an invalid manifest = %d, want 400", rec.Code)
+	}
+}
+
+func TestUpdateNameCollisionIsConflict(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+	createProject(t, h, validForm(), owner) // "blog"
+	other := validForm()
+	other.Name = "other"
+	otherID := createProject(t, h, other, owner)
+
+	rename := validForm()
+	rename.Name = "blog" // collides with the first project
+	if rec := update(t, h, otherID, rename, owner); rec.Code != http.StatusConflict {
+		t.Fatalf("rename onto an existing name = %d, want 409", rec.Code)
+	}
+}
+
+func TestUpdateRequiresOwner(t *testing.T) {
+	h := NewHandlers(newFakeStore(), nil)
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPut, "/api/owner/projects/x", strings.NewReader(`{}`))
+	r.SetPathValue("id", "x")
+	h.Update(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("update without an Owner = %d, want 401", rec.Code)
 	}
 }
 
