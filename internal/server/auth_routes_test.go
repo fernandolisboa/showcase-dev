@@ -80,7 +80,11 @@ func (noopProjectStore) GetOwnerProject(context.Context, int64, string) (store.P
 func (noopProjectStore) ListProjectsByOwner(context.Context, int64) ([]store.Project, error) {
 	return nil, nil
 }
-func (noopProjectStore) PublishProject(context.Context, int64, string, string) error { return nil }
+func (noopProjectStore) StartBuild(context.Context, int64, string) (store.Project, error) {
+	return store.Project{}, store.ErrProjectNotFound
+}
+func (noopProjectStore) MarkBuildFailed(context.Context, int64, string, string) error { return nil }
+func (noopProjectStore) PublishProject(context.Context, int64, string, string) error  { return nil }
 func (noopProjectStore) OwnerByUsername(context.Context, string) (store.Owner, error) {
 	return store.Owner{}, store.ErrNotFound
 }

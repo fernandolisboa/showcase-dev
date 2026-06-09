@@ -20,10 +20,11 @@ import (
 // by owner so it can exercise the per-owner uniqueness and ownership scoping the
 // real store enforces in SQL.
 type fakeStore struct {
-	byOwner map[int64][]store.Project
-	owners  map[string]store.Owner // by username, for the portfolio lookup
-	nextID  int
-	failGet bool // force a non-NotFound error path
+	byOwner     map[int64][]store.Project
+	owners      map[string]store.Owner // by username, for the portfolio lookup
+	nextID      int
+	failGet     bool // force a non-NotFound error path on GetOwnerProject
+	failPublish bool // force PublishProject to fail (after a successful build)
 }
 
 func newFakeStore() *fakeStore {
@@ -108,11 +109,41 @@ func (f *fakeStore) ListProjectsByOwner(_ context.Context, ownerID int64) ([]sto
 	return f.byOwner[ownerID], nil
 }
 
+func (f *fakeStore) StartBuild(_ context.Context, ownerID int64, id string) (store.Project, error) {
+	for i := range f.byOwner[ownerID] {
+		if f.byOwner[ownerID][i].ID == id {
+			if f.byOwner[ownerID][i].BuildState == "building" {
+				return store.Project{}, store.ErrBuildInProgress
+			}
+			f.byOwner[ownerID][i].BuildState = "building"
+			f.byOwner[ownerID][i].BuildError = ""
+			return f.byOwner[ownerID][i], nil
+		}
+	}
+	return store.Project{}, store.ErrProjectNotFound
+}
+
+func (f *fakeStore) MarkBuildFailed(_ context.Context, ownerID int64, id, buildError string) error {
+	for i := range f.byOwner[ownerID] {
+		if f.byOwner[ownerID][i].ID == id {
+			f.byOwner[ownerID][i].BuildState = "failed"
+			f.byOwner[ownerID][i].BuildError = buildError
+			return nil // a failed build never un-publishes
+		}
+	}
+	return store.ErrProjectNotFound
+}
+
 func (f *fakeStore) PublishProject(_ context.Context, ownerID int64, id, commitSHA string) error {
+	if f.failPublish {
+		return errors.New("boom")
+	}
 	for i := range f.byOwner[ownerID] {
 		if f.byOwner[ownerID][i].ID == id {
 			f.byOwner[ownerID][i].Published = true
 			f.byOwner[ownerID][i].CommitSHA = commitSHA
+			f.byOwner[ownerID][i].BuildState = "published"
+			f.byOwner[ownerID][i].BuildError = ""
 			return nil
 		}
 	}
@@ -406,10 +437,10 @@ func TestPublishSuccess(t *testing.T) {
 	}
 	var got map[string]any
 	_ = json.NewDecoder(rec.Body).Decode(&got)
-	if got["published"] != true || got["commitSha"] != "abc123" {
+	if got["published"] != true || got["commitSha"] != "abc123" || got["buildState"] != "published" {
 		t.Errorf("unexpected publish response: %v", got)
 	}
-	if stored := fs.byOwner[1][0]; !stored.Published || stored.CommitSHA != "abc123" {
+	if stored := fs.byOwner[1][0]; !stored.Published || stored.CommitSHA != "abc123" || stored.BuildState != "published" {
 		t.Errorf("project not persisted as published: %+v", stored)
 	}
 }
@@ -424,8 +455,68 @@ func TestPublishBuildFailureDoesNotPublish(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("build-fail publish = %d, want 422", rec.Code)
 	}
-	if fs.byOwner[1][0].Published {
+	if stored := fs.byOwner[1][0]; stored.Published {
 		t.Error("a project whose build failed must not be published")
+	} else if stored.BuildState != "failed" || stored.BuildError == "" {
+		t.Errorf("a failed build must record build_state='failed' + an error, got %+v", stored)
+	}
+}
+
+func TestPublishWhileBuildingIs409(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "abc123"}
+	h := NewHandlers(fs, fb)
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), owner)
+	// Simulate a build already in flight (as a concurrent publish would have left it).
+	fs.byOwner[1][0].BuildState = "building"
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("publish while building = %d, want 409", rec.Code)
+	}
+	if fb.called {
+		t.Error("must not start a second build while one is already in flight")
+	}
+}
+
+func TestPublishFailedRebuildKeepsPublished(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "abc123"}
+	h := NewHandlers(fs, fb)
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), owner)
+	if rec := publish(t, h, id, owner); rec.Code != http.StatusOK {
+		t.Fatalf("initial publish = %d, body=%s", rec.Code, rec.Body)
+	}
+
+	// A failing RE-build must not un-publish the live version (a failed build never
+	// un-publishes — the old build keeps playing while build_state reports the failure).
+	fb.err = errors.New("RUN build failed")
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("failed re-build = %d, want 422", rec.Code)
+	}
+	if stored := fs.byOwner[1][0]; !stored.Published || stored.CommitSHA != "abc123" || stored.BuildState != "failed" {
+		t.Errorf("a failed re-build must keep the prior publish live: %+v", stored)
+	}
+}
+
+func TestPublishPersistFailureSettlesState(t *testing.T) {
+	fs := newFakeStore()
+	fs.failPublish = true // the build succeeds but recording the publish fails
+	h := NewHandlers(fs, &fakeBuilder{commit: "abc123"})
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	id := createProject(t, h, validForm(), owner)
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("publish with a failing persist = %d, want 500", rec.Code)
+	}
+	// The row must settle to 'failed' (retryable), not be stranded in 'building' (which
+	// would 409 every retry).
+	if stored := fs.byOwner[1][0]; stored.BuildState != "failed" || stored.BuildError == "" {
+		t.Errorf("a persist failure must settle to 'failed', not strand in 'building': %+v", stored)
 	}
 }
 
