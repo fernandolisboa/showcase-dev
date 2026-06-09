@@ -291,15 +291,25 @@ func lastBytes(s string, max int) string {
 	return "…" + s[len(s)-max:]
 }
 
-// projectView is the JSON shape returned for a Project. Timestamps and the stored
-// manifest are intentionally omitted for now — echoing the manifest back as an
-// editable Form pairs with the edit UI in a later slice; here the Owner sees the
-// Project's identity, publish state, and (once published) the built commit.
+// projectView is the JSON shape returned for a Project: its identity, publish state,
+// the built commit (once published), and the stored run contract echoed back as an
+// editable Form under "manifest" so the edit UI can round-trip it (#51). The Form's
+// Name is set from the Project name (it is a column, not a manifest field). The stored
+// manifest is canonical, validated JSON (the write path Marshals a Validated
+// runcontract.Manifest), so the decode does not fail in practice; if it ever did, the
+// manifest is omitted rather than failing the whole view (e.g. a List of many projects).
 func projectView(p store.Project) map[string]any {
-	return map[string]any{
+	v := map[string]any{
 		"id":        p.ID,
 		"name":      p.Name,
 		"published": p.Published,
 		"commitSha": p.CommitSHA,
 	}
+	var m runcontract.Manifest
+	if err := json.Unmarshal(p.Manifest, &m); err == nil {
+		form := formFromManifest(m)
+		form.Name = p.Name
+		v["manifest"] = form
+	}
+	return v
 }

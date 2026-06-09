@@ -288,6 +288,51 @@ func TestGetFoundAndCrossOwner(t *testing.T) {
 	}
 }
 
+func TestGetEchoesManifestAsForm(t *testing.T) {
+	fs := newFakeStore()
+	h := NewHandlers(fs, nil)
+	owner := store.Owner{ID: 1}
+
+	form := validForm()
+	form.DB = &FormDB{Engine: "postgres", Version: "17"}
+	form.Env = []FormEnv{{Name: "LOG_LEVEL", Source: "static", Value: "info"}}
+	id := createProject(t, h, form, owner)
+
+	rec := httptest.NewRecorder()
+	r := request(t, http.MethodGet, "/api/owner/projects/"+id, nil, owner)
+	r.SetPathValue("id", id)
+	h.Get(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Get = %d, body=%s", rec.Code, rec.Body)
+	}
+
+	var got struct {
+		Name     string `json:"name"`
+		Manifest Form   `json:"manifest"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The echoed Form carries the Project name (a column, not a manifest field) so the
+	// edit UI can PUT it straight back.
+	if got.Manifest.Name != "blog" {
+		t.Errorf("echoed form Name = %q, want the project name %q", got.Manifest.Name, "blog")
+	}
+	if len(got.Manifest.Services) != 1 || got.Manifest.Services[0].Name != "web" || got.Manifest.Services[0].Role != "ui" {
+		t.Errorf("echoed form lost the service: %+v", got.Manifest.Services)
+	}
+	if got.Manifest.DB == nil || got.Manifest.DB.Engine != "postgres" {
+		t.Errorf("echoed form lost the db: %+v", got.Manifest.DB)
+	}
+	if len(got.Manifest.Env) != 1 || got.Manifest.Env[0].Name != "LOG_LEVEL" || got.Manifest.Env[0].Value != "info" {
+		t.Errorf("echoed form lost env: %+v", got.Manifest.Env)
+	}
+	// The echoed Form must itself be a valid create/update body — it round-trips.
+	if _, err := got.Manifest.toManifest(); err != nil {
+		t.Errorf("echoed form does not map back to a manifest: %v", err)
+	}
+}
+
 // fakeBuilder is a ProjectBuilder that records whether it ran and returns a fixed
 // commit or error.
 type fakeBuilder struct {

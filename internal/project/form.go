@@ -118,3 +118,49 @@ func (f Form) toManifest() (runcontract.Manifest, error) {
 
 	return m, nil
 }
+
+// formFromManifest is the reverse of toManifest: it projects an internal run contract
+// back onto the curated Owner Form so the API can echo a stored Project's configuration
+// as an editable Form (the edit UI reads it, edits it, and PUTs it back — #51). It is a
+// faithful inverse of toManifest at the Manifest level — every field toManifest carries,
+// this restores — EXCEPT Form.Name, which is not a manifest field (the Project name is a
+// separate column), so the caller sets it. It does no validation: toManifest re-validates
+// on the way back in, and the source manifest was already validated when it was stored.
+func formFromManifest(m runcontract.Manifest) Form {
+	var f Form
+
+	for _, s := range m.Services {
+		f.Services = append(f.Services, FormService{
+			Name:        s.Name,
+			Repo:        s.Repo,
+			Dockerfile:  s.Dockerfile,
+			Port:        s.Port,
+			Role:        string(s.Role),
+			PathPrefix:  s.PathPrefix,
+			Healthcheck: s.Healthcheck,
+		})
+	}
+
+	if m.DB != nil {
+		f.DB = &FormDB{Engine: m.DB.Engine, Version: m.DB.Version}
+	}
+
+	for _, e := range m.Env {
+		f.Env = append(f.Env, FormEnv{
+			Name:   e.Name,
+			Source: string(e.Source),
+			Value:  e.Value,
+			Secret: e.Secret,
+		})
+	}
+
+	if m.Seed != nil {
+		f.Seed = &FormSeed{Service: m.Seed.Service, Command: m.Seed.Command}
+	}
+
+	for _, g := range m.Egress {
+		f.Egress = append(f.Egress, FormEgress{Host: g.Host, Port: g.Port})
+	}
+
+	return f
+}
