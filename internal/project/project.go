@@ -59,17 +59,41 @@ type ProjectBuilder interface {
 	BuildProject(ctx context.Context, ownerLogin, projectID string, manifest runcontract.Manifest) (commits map[string]string, err error)
 }
 
+// RepoAccessChecker verifies that the signed-in Owner is entitled to publish a repo they
+// do not own outright — an org repo, or any repo under another account (#50): it reports
+// whether username has access to repoOwner/repoName. The real implementation
+// (githubapp.Client) checks the Owner's repository permission through the App installation.
+// When nil, only the Owner's own repos (owner == their login) may be published.
+type RepoAccessChecker interface {
+	HasRepoAccess(ctx context.Context, repoOwner, repoName, username string) (bool, error)
+}
+
 // Handlers serve the Owner project endpoints. Construct with NewHandlers and mount
 // each method behind auth.RequireOwner (they read the Owner from context).
 type Handlers struct {
 	store     Store
-	publisher *Publisher // nil => publishing is not configured (501)
+	publisher *Publisher        // nil => publishing is not configured (501)
+	access    RepoAccessChecker // nil => only the Owner's own repos may be published
 }
 
+// HandlerOption configures optional Handlers dependencies.
+type HandlerOption func(*Handlers)
+
+// WithRepoAccess enables publishing repos the Owner does not own directly (org repos),
+// gated by verifying the Owner's GitHub access to each (#50). Without it, only the Owner's
+// own repos (owner == their login) may be published.
+func WithRepoAccess(a RepoAccessChecker) HandlerOption { return func(h *Handlers) { h.access = a } }
+
 // NewHandlers wires the project handlers to a Store and (optionally) a Publisher. A nil
-// publisher leaves create/list/get/update working but makes publish report 501 (no
-// GitHub App credentials in dev).
-func NewHandlers(s Store, p *Publisher) *Handlers { return &Handlers{store: s, publisher: p} }
+// publisher leaves create/list/get/update working but makes publish report 501 (no GitHub
+// App credentials in dev). Pass WithRepoAccess to allow publishing org repos.
+func NewHandlers(s Store, p *Publisher, opts ...HandlerOption) *Handlers {
+	h := &Handlers{store: s, publisher: p}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
 
 // Create persists a new Project for the signed-in Owner. Body: a Form (JSON).
 // It maps the form to a runcontract.Manifest, validates it (reusing the contract's
@@ -226,7 +250,8 @@ func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 // the Project (buildState/buildError). Must be mounted behind RequireOwner with an {id}
 // path value. 404 if the Project is not theirs, 501 if publishing is not configured (no
 // GitHub App credentials), 409 if a build is already in flight, 422 if any service's repo
-// is not the Owner's own, 202 with the 'building' view once the build is launched.
+// is one the Owner may not publish (a repo under another account/org they lack GitHub
+// access to, or org repos are not enabled), 202 with the 'building' view once launched.
 func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 	owner, ok := auth.OwnerFrom(r.Context())
 	if !ok {
@@ -252,10 +277,12 @@ func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// Security: an Owner may only publish their OWN repositories; services may span several
-	// of the Owner's repos, each pinned to its own resolved commit (#50). Checked before
-	// marking the build started, so a rejected repo never enters 'building'.
-	if err := checkOwnerRepos(owner.GitHubLogin, m); err != nil {
+	// Security: every service's repo must be one the Owner may publish — their own, or (with
+	// an access checker) an org repo they have GitHub access to (#50). Services may span
+	// several repos, each pinned to its own resolved commit. Checked before marking the
+	// build started, so a rejected repo never enters 'building'. Network checks are bounded
+	// by the request context.
+	if err := checkRepoAccess(r.Context(), h.access, owner.GitHubLogin, m); err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
@@ -317,21 +344,36 @@ func (h *Handlers) Portfolio(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// checkOwnerRepos enforces that every service's repo is the signed-in Owner's own
-// (parsed owner == their GitHub login). A Project's services MAY now span multiple repos
-// (#50: each service is pinned to its own repo's commit), so there is no longer a
-// single-repo restriction — only the ownership check. It is a publish precondition
-// surfaced to the Owner as 422. Cross-owner public repos are rejected here, since the
-// installation-token boundary only stops PRIVATE repos; relaxing owner==login to allow
-// org repos the Owner has access to is the next slice (a deliberate access gate).
-func checkOwnerRepos(ownerLogin string, m runcontract.Manifest) error {
+// checkRepoAccess is the publish authorization gate (#50): every service's repo must be one
+// the signed-in Owner may publish. The Owner's OWN repos (parsed owner == their GitHub
+// login) are always allowed with no network call. A repo under another account or org is
+// allowed only when an access checker is configured AND it confirms the Owner has GitHub
+// access to that repo (which also requires the App be installed, so the platform can build
+// it). Without a checker, foreign repos are rejected. Services may span repos (each pinned
+// to its own commit). Every failure is surfaced to the Owner as 422. The ownership fast
+// path matters for security too: it can never be a confused-deputy, since a repo the Owner
+// literally owns needs no external check.
+func checkRepoAccess(ctx context.Context, access RepoAccessChecker, ownerLogin string, m runcontract.Manifest) error {
 	for _, svc := range m.Services {
 		owner, repo, err := githubapp.ParseRepo(svc.Repo)
 		if err != nil {
 			return fmt.Errorf("service %q: %v", svc.Name, err)
 		}
-		if !strings.EqualFold(owner, ownerLogin) {
-			return fmt.Errorf("service %q: %s/%s is not your repository — you can only publish repos you own", svc.Name, owner, repo)
+		if strings.EqualFold(owner, ownerLogin) {
+			continue // the Owner's own repo — always allowed
+		}
+		if access == nil {
+			return fmt.Errorf("service %q: %s/%s is not your repository — building repos under another account or org is not enabled", svc.Name, owner, repo)
+		}
+		ok, err := access.HasRepoAccess(ctx, owner, repo, ownerLogin)
+		if err != nil {
+			if errors.Is(err, githubapp.ErrNoInstallation) {
+				return fmt.Errorf("service %q: the Showcase GitHub App is not installed on %s/%s", svc.Name, owner, repo)
+			}
+			return fmt.Errorf("service %q: could not verify your access to %s/%s — please try again", svc.Name, owner, repo)
+		}
+		if !ok {
+			return fmt.Errorf("service %q: you do not have access to %s/%s", svc.Name, owner, repo)
 		}
 	}
 	return nil

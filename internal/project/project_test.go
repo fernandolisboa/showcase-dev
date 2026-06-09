@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/fernandolisboa/showcase-dev/internal/auth"
+	"github.com/fernandolisboa/showcase-dev/internal/githubapp"
 	"github.com/fernandolisboa/showcase-dev/internal/runcontract"
 	"github.com/fernandolisboa/showcase-dev/internal/store"
 )
@@ -604,6 +605,62 @@ func TestPublishNotOwnerIs404(t *testing.T) {
 	}
 }
 
+func TestPublishOrgRepoWithAccess(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "abc123"}
+	pub := NewPublisher(fs, fb, discardLogger())
+	access := fakeAccess{allow: map[string]bool{"acme/app": true}}
+	h := NewHandlers(fs, pub, WithRepoAccess(access))
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	form := validForm()
+	form.Services[0].Repo = "github.com/acme/app" // an org repo the Owner can access
+	id := createProject(t, h, form, owner)
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("publish org repo with access = %d, want 202; body=%s", rec.Code, rec.Body)
+	}
+	pub.wait()
+	if !fs.byOwner[1][0].Published {
+		t.Error("an org repo the Owner can access should publish")
+	}
+}
+
+func TestPublishOrgRepoWithoutAccessIs422(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "abc123"}
+	h := NewHandlers(fs, NewPublisher(fs, fb, discardLogger()), WithRepoAccess(fakeAccess{})) // no access to anything
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	form := validForm()
+	form.Services[0].Repo = "github.com/acme/app"
+	id := createProject(t, h, form, owner)
+
+	rec := publish(t, h, id, owner)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("publish org repo without access = %d, want 422", rec.Code)
+	}
+	if fb.called {
+		t.Error("must not build a repo the Owner cannot access")
+	}
+}
+
+func TestPublishOrgRepoWithoutCheckerIs422(t *testing.T) {
+	fs := newFakeStore()
+	fb := &fakeBuilder{commit: "abc123"}
+	h := NewHandlers(fs, NewPublisher(fs, fb, discardLogger())) // no WithRepoAccess: org repos disabled
+	owner := store.Owner{ID: 1, GitHubLogin: "me"}
+	form := validForm()
+	form.Services[0].Repo = "github.com/acme/app"
+	id := createProject(t, h, form, owner)
+
+	if rec := publish(t, h, id, owner); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("publish org repo without a checker = %d, want 422", rec.Code)
+	}
+	if fb.called {
+		t.Error("must not build an org repo when org repos are not enabled")
+	}
+}
+
 func TestPublishRequiresOwner(t *testing.T) {
 	h := NewHandlers(newFakeStore(), nil)
 	rec := httptest.NewRecorder()
@@ -807,7 +864,21 @@ func TestPortfolioEmptyWhenNothingPublished(t *testing.T) {
 	}
 }
 
-func TestCheckOwnerRepos(t *testing.T) {
+// fakeAccess is a RepoAccessChecker for tests: allow lists owner/repo (lowercased) the
+// Owner may publish; err forces the error path.
+type fakeAccess struct {
+	allow map[string]bool
+	err   error
+}
+
+func (f fakeAccess) HasRepoAccess(_ context.Context, owner, repo, _ string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.allow[strings.ToLower(owner+"/"+repo)], nil
+}
+
+func TestCheckRepoAccess(t *testing.T) {
 	man := func(repos ...string) runcontract.Manifest {
 		var m runcontract.Manifest
 		for i, r := range repos {
@@ -820,25 +891,43 @@ func TestCheckOwnerRepos(t *testing.T) {
 		}
 		return m
 	}
-	if err := checkOwnerRepos("me", man("github.com/me/app")); err != nil {
-		t.Errorf("own single repo should pass: %v", err)
+	ctx := context.Background()
+
+	// The Owner's own repos are always allowed with no checker — including multi-repo.
+	if err := checkRepoAccess(ctx, nil, "me", man("github.com/me/app", "github.com/me/other")); err != nil {
+		t.Errorf("own multi-repo should pass with no checker: %v", err)
 	}
-	if err := checkOwnerRepos("Me", man("github.com/me/app", "me/app")); err != nil {
-		t.Errorf("own repo, two services one repo (case-insensitive) should pass: %v", err)
+	// A foreign repo with no checker is rejected (org repos not enabled).
+	if err := checkRepoAccess(ctx, nil, "me", man("github.com/acme/app")); err == nil {
+		t.Error("a foreign repo must be rejected when org repos are not enabled")
 	}
-	if err := checkOwnerRepos("me", man("github.com/someoneelse/app")); err == nil {
-		t.Error("a repo the Owner does not own must be rejected")
-	}
-	// Multi-repo is now allowed (#50) as long as every repo is the Owner's own.
-	if err := checkOwnerRepos("me", man("github.com/me/app", "github.com/me/other")); err != nil {
-		t.Errorf("own multiple repos should pass now (#50): %v", err)
-	}
-	// ...but one foreign repo among the Owner's own is still rejected.
-	if err := checkOwnerRepos("me", man("github.com/me/app", "github.com/someoneelse/other")); err == nil {
-		t.Error("a foreign repo among the Owner's own must still be rejected")
-	}
-	if err := checkOwnerRepos("me", man("not a repo")); err == nil {
+	if err := checkRepoAccess(ctx, nil, "me", man("not a repo")); err == nil {
 		t.Error("an unparseable repo must be rejected")
+	}
+
+	// With a checker: an org repo the Owner can access passes; one they cannot is rejected.
+	access := fakeAccess{allow: map[string]bool{"acme/app": true}}
+	if err := checkRepoAccess(ctx, access, "me", man("github.com/acme/app")); err != nil {
+		t.Errorf("an org repo the Owner can access should pass: %v", err)
+	}
+	if err := checkRepoAccess(ctx, access, "me", man("github.com/acme/secret")); err == nil {
+		t.Error("an org repo the Owner cannot access must be rejected")
+	}
+	// Mixed: the Owner's own repo + an accessible org repo passes; the checker is only
+	// consulted for the foreign one.
+	if err := checkRepoAccess(ctx, access, "me", man("github.com/me/ui", "github.com/acme/app")); err != nil {
+		t.Errorf("own + accessible org should pass: %v", err)
+	}
+	// The App not being installed on the org repo is surfaced clearly (and rejects).
+	if err := checkRepoAccess(ctx, fakeAccess{err: githubapp.ErrNoInstallation}, "me", man("github.com/acme/app")); err == nil {
+		t.Error("an org repo without the App installed must be rejected")
+	}
+	// A transient verification failure (not ErrNoInstallation) is rejected with a retryable
+	// message, distinct from a genuine no-access.
+	if err := checkRepoAccess(ctx, fakeAccess{err: errors.New("boom")}, "me", man("github.com/acme/app")); err == nil {
+		t.Error("a transient access-check failure must be rejected")
+	} else if !strings.Contains(err.Error(), "try again") {
+		t.Errorf("a transient failure should be retryable, got %q", err.Error())
 	}
 }
 
