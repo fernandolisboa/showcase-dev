@@ -2,6 +2,7 @@ package project
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"sync"
@@ -54,7 +55,7 @@ func (p *Publisher) Start(ownerID int64, ownerLogin, projectID string, m runcont
 func (p *Publisher) build(ownerID int64, ownerLogin, projectID string, m runcontract.Manifest) {
 	defer p.inflight.Done()
 
-	commitSHA, err := p.builder.BuildProject(p.baseCtx, ownerLogin, projectID, m)
+	commits, err := p.builder.BuildProject(p.baseCtx, ownerLogin, projectID, m)
 	settleCtx := context.WithoutCancel(p.baseCtx)
 
 	if err != nil {
@@ -74,12 +75,32 @@ func (p *Publisher) build(ownerID int64, ownerLogin, projectID string, m runcont
 		return
 	}
 
-	if err := p.store.PublishProject(settleCtx, ownerID, projectID, commitSHA); err != nil {
+	// Persist the per-service commits (#50) plus the headline (the UI service's commit)
+	// for the single-commit API/display. json.Marshal of a map[string]string never fails.
+	serviceCommits, _ := json.Marshal(commits)
+	if err := p.store.PublishProject(settleCtx, ownerID, projectID, headlineCommit(m, commits), serviceCommits); err != nil {
 		// The build succeeded but recording the publish failed; settle out of 'building' so
 		// the Owner can retry (a retry rebuilds from cache, so it is cheap).
 		p.logger.Error("build succeeded but recording the publish failed", "project", projectID, "err", err)
 		_ = p.store.MarkBuildFailed(settleCtx, ownerID, projectID, "build succeeded but publishing failed; please retry")
 	}
+}
+
+// headlineCommit picks the commit shown as the Project's single headline commit_sha (for
+// the existing API/display): the UI service's commit (manifest validation guarantees
+// exactly one ui service), falling back to any non-empty commit.
+func headlineCommit(m runcontract.Manifest, commits map[string]string) string {
+	for _, svc := range m.Services {
+		if svc.Role == runcontract.RoleUI {
+			return commits[svc.Name]
+		}
+	}
+	for _, svc := range m.Services {
+		if c := commits[svc.Name]; c != "" {
+			return c
+		}
+	}
+	return ""
 }
 
 // ReapStuckBuilds reclaims builds stranded in 'building' (by a crash or a restart

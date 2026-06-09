@@ -1,0 +1,11 @@
+-- Per-service source commits for multi-repo Projects (#50). A Project whose services
+-- span more than one repo cannot be pinned by a single commit_sha, so service_commits
+-- records the resolved commit per service (a JSON object {service_name: commit_sha})
+-- captured at publish. The play path pins each service to its own commit so the build is
+-- a cache hit for every service even across repos.
+--
+-- Nullable and additive: commit_sha stays the headline (the UI service's commit) for the
+-- existing single-commit API and display; a pre-#50 single-repo Project has a null
+-- service_commits and every service falls back to commit_sha (runner.Project.Commit), so
+-- no backfill is needed and already-published Projects keep playing unchanged.
+ALTER TABLE projects ADD COLUMN service_commits jsonb;

@@ -209,10 +209,10 @@ func TestProjectRoundTripAndOwnership(t *testing.T) {
 	// Publishing flips published AND records the built commit, owner-scoped. A
 	// cross-owner publish affects no row.
 	const sha = "0123456789abcdef0123456789abcdef01234567"
-	if err := s.PublishProject(ctx, bob.ID, p.ID, sha); !errors.Is(err, ErrProjectNotFound) {
+	if err := s.PublishProject(ctx, bob.ID, p.ID, sha, nil); !errors.Is(err, ErrProjectNotFound) {
 		t.Errorf("cross-owner PublishProject = %v, want ErrProjectNotFound", err)
 	}
-	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha, nil); err != nil {
 		t.Fatalf("PublishProject: %v", err)
 	}
 	pub, err := s.GetPublishedProject(ctx, p.ID)
@@ -269,7 +269,7 @@ func TestUpdateProject(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	const sha = "0123456789abcdef0123456789abcdef01234567"
-	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha, nil); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -370,7 +370,7 @@ func TestBuildLifecycle(t *testing.T) {
 		t.Fatalf("re-StartBuild after failure: %v", err)
 	}
 	const sha = "0123456789abcdef0123456789abcdef01234567"
-	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha, nil); err != nil {
 		t.Fatalf("PublishProject: %v", err)
 	}
 	published, _ := s.GetOwnerProject(ctx, alice.ID, p.ID)
@@ -399,7 +399,7 @@ func TestBuildLifecycle(t *testing.T) {
 	if _, err := s.StartBuild(ctx, alice.ID, p.ID); err != nil {
 		t.Fatalf("re-StartBuild before re-publish: %v", err)
 	}
-	if err := s.PublishProject(ctx, alice.ID, p.ID, sha); err != nil {
+	if err := s.PublishProject(ctx, alice.ID, p.ID, sha, nil); err != nil {
 		t.Fatalf("re-publish: %v", err)
 	}
 
@@ -468,6 +468,55 @@ func TestReclaimStuckBuilds(t *testing.T) {
 	}
 	if n, _ := s.ReclaimStuckBuilds(ctx, 0, 0); n != 1 {
 		t.Errorf("the 2-service build must reclaim once its window passes, got %d", n)
+	}
+}
+
+// TestPublishServiceCommits verifies the #50 per-service commit storage: PublishProject
+// persists the headline commit_sha + the service_commits jsonb, they round-trip through
+// the play read path, and an edit clears them (back to draft).
+func TestPublishServiceCommits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	s := startStore(t, ctx)
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	alice, _ := s.UpsertOwnerByGitHubID(ctx, 100, "alice")
+
+	m := []byte(`{"Services":[{"Name":"web","Role":"ui"},{"Name":"api","Role":"api","PathPrefix":"/api"}]}`)
+	p, err := s.CreateProject(ctx, alice.ID, "app", m)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.StartBuild(ctx, alice.ID, p.ID); err != nil {
+		t.Fatalf("StartBuild: %v", err)
+	}
+	sc := []byte(`{"web":"websha","api":"apisha"}`)
+	if err := s.PublishProject(ctx, alice.ID, p.ID, "websha", sc); err != nil {
+		t.Fatalf("PublishProject: %v", err)
+	}
+
+	// The per-service commits round-trip through the play read path (jsonb reformats, so
+	// assert semantically).
+	pub, err := s.GetPublishedProject(ctx, p.ID)
+	if err != nil || pub.CommitSHA != "websha" {
+		t.Fatalf("GetPublishedProject = (%+v, %v), want commit_sha websha", pub, err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(pub.ServiceCommits, &got); err != nil {
+		t.Fatalf("service_commits not valid json: %v (%s)", err, pub.ServiceCommits)
+	}
+	if got["web"] != "websha" || got["api"] != "apisha" {
+		t.Errorf("service_commits did not round-trip: %v", got)
+	}
+
+	// Editing the manifest clears service_commits (and the rest of the publish state).
+	edited, err := s.UpdateProject(ctx, alice.ID, p.ID, "app", []byte(`{"Services":[{"Name":"web","Role":"ui"}]}`))
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if len(edited.ServiceCommits) != 0 || edited.Published || edited.CommitSHA != "" {
+		t.Errorf("editing the manifest must clear service_commits and the publish state: %+v", edited)
 	}
 }
 

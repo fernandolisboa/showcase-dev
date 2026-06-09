@@ -75,6 +75,36 @@ func TestBuildingSourcePassesPinnedCommitToSpec(t *testing.T) {
 	}
 }
 
+func TestBuildingSourcePinsPerServiceCommits(t *testing.T) {
+	// A multi-repo Project pins each service to its OWN commit via Commits; a service
+	// absent from the map falls back to the project-wide Commit (#50). Two services so the
+	// fallback branch is actually exercised: "web" is pinned, "api" falls back.
+	fb := &fakeBuilder{tag: "img"}
+	m := runcontract.Manifest{Services: []runcontract.Service{
+		{Name: "web", Role: runcontract.RoleUI},
+		{Name: "api", Role: runcontract.RoleAPI, PathPrefix: "/api"},
+	}}
+	base := runner.StaticSource{P: runner.Project{
+		Manifest: m,
+		Commit:   "fallbacksha",
+		Commits:  map[string]string{"web": "websha"}, // only "web" pinned
+	}}
+	seen := map[string]string{}
+	spec := func(_ context.Context, _ string, svc runcontract.Service, commit string) (BuildSpec, error) {
+		seen[svc.Name] = commit
+		return BuildSpec{ImageName: "x-" + svc.Name, Version: commit}, nil
+	}
+	if _, err := NewBuildingSource(base, fb, spec, discardLogger()).Project(context.Background(), "p1"); err != nil {
+		t.Fatalf("project: %v", err)
+	}
+	if seen["web"] != "websha" {
+		t.Errorf("a pinned service must build at its own commit, got %q", seen["web"])
+	}
+	if seen["api"] != "fallbacksha" {
+		t.Errorf("an unpinned service must fall back to Commit, got %q", seen["api"])
+	}
+}
+
 func TestBuildingSourceBuildsEveryServiceSoSeedIsCovered(t *testing.T) {
 	// A Seed reuses a declared service's image (manifest validation guarantees
 	// seed.service is declared). Building every declared service must therefore

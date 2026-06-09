@@ -42,6 +42,53 @@ func TestSourceResolvesPublishedManifest(t *testing.T) {
 	}
 }
 
+func TestSourceReadsPerServiceCommits(t *testing.T) {
+	manifest, _ := json.Marshal(runcontract.Manifest{
+		Services: []runcontract.Service{{Name: "web", Repo: "r", Dockerfile: "Dockerfile", Port: 8080, Role: runcontract.RoleUI}},
+	})
+	src := NewSource(fakePublishedStore{p: store.Project{
+		ID: "p1", Manifest: manifest, CommitSHA: "headsha",
+		ServiceCommits: []byte(`{"web":"websha","api":"apisha"}`),
+	}})
+	got, err := src.Project(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	// The headline commit stays the per-service fallback; the per-service map pins each.
+	if got.Commit != "headsha" {
+		t.Errorf("headline Commit = %q, want headsha", got.Commit)
+	}
+	if got.Commits["web"] != "websha" || got.Commits["api"] != "apisha" {
+		t.Errorf("per-service commits not read: %v", got.Commits)
+	}
+}
+
+func TestSourceWithoutServiceCommitsFallsBack(t *testing.T) {
+	// A pre-#50 single-repo Project has no service_commits, so every service falls back to
+	// the headline Commit (Commits stays empty).
+	manifest, _ := json.Marshal(runcontract.Manifest{
+		Services: []runcontract.Service{{Name: "web", Repo: "r", Dockerfile: "Dockerfile", Port: 8080, Role: runcontract.RoleUI}},
+	})
+	src := NewSource(fakePublishedStore{p: store.Project{ID: "p1", Manifest: manifest, CommitSHA: "headsha"}})
+	got, err := src.Project(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	if got.Commit != "headsha" || len(got.Commits) != 0 {
+		t.Errorf("a pre-#50 project should have empty Commits + the headline fallback, got Commit=%q Commits=%v", got.Commit, got.Commits)
+	}
+}
+
+func TestSourcePropagatesCorruptServiceCommits(t *testing.T) {
+	manifest, _ := json.Marshal(runcontract.Manifest{
+		Services: []runcontract.Service{{Name: "web", Repo: "r", Dockerfile: "Dockerfile", Port: 8080, Role: runcontract.RoleUI}},
+	})
+	src := NewSource(fakePublishedStore{p: store.Project{ID: "p1", Manifest: manifest, ServiceCommits: []byte(`{bad`)}})
+	if _, err := src.Project(context.Background(), "p1"); err == nil || errors.Is(err, runner.ErrProjectNotFound) {
+		t.Fatalf("err = %v, want a decode error (corrupt service_commits must not silently fall back)", err)
+	}
+}
+
 func TestSourceMapsNotFoundToRunnerSentinel(t *testing.T) {
 	src := NewSource(fakePublishedStore{err: store.ErrProjectNotFound})
 	_, err := src.Project(context.Background(), "missing")

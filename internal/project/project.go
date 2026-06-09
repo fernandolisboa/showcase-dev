@@ -43,19 +43,20 @@ type Store interface {
 	ListProjectsByOwner(ctx context.Context, ownerID int64) ([]store.Project, error)
 	StartBuild(ctx context.Context, ownerID int64, id string) (store.Project, error)
 	MarkBuildFailed(ctx context.Context, ownerID int64, id, buildError string) error
-	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string) error
+	PublishProject(ctx context.Context, ownerID int64, id, commitSHA string, serviceCommits []byte) error
 	ReclaimStuckBuilds(ctx context.Context, perServiceTimeout, grace time.Duration) (int64, error)
 	OwnerByUsername(ctx context.Context, username string) (store.Owner, error)
 	ListPublishedProjectsByUsername(ctx context.Context, username string) ([]store.Project, error)
 }
 
 // ProjectBuilder builds every service of a Project's manifest from source at publish,
-// returning the commit it built (the headline/UI commit) so the publisher can pin it.
-// It is the seam to the image builder + repo clone. An error means the build failed —
-// the Project is not published. ownerLogin scopes which installation the clone token is
-// minted for. It is synchronous (the Publisher runs it on a background goroutine).
+// returning the commit each service was built at (service name -> commit SHA) so the
+// publisher can pin them — a Project whose services span repos gets a commit per repo
+// (#50). It is the seam to the image builder + repo clone. An error means the build
+// failed — the Project is not published. ownerLogin scopes which installation the clone
+// token is minted for. It is synchronous (the Publisher runs it on a background goroutine).
 type ProjectBuilder interface {
-	BuildProject(ctx context.Context, ownerLogin, projectID string, manifest runcontract.Manifest) (commitSHA string, err error)
+	BuildProject(ctx context.Context, ownerLogin, projectID string, manifest runcontract.Manifest) (commits map[string]string, err error)
 }
 
 // Handlers serve the Owner project endpoints. Construct with NewHandlers and mount
@@ -224,8 +225,8 @@ func (h *Handlers) Get(w http.ResponseWriter, r *http.Request) {
 // ADR-0003: build at publish, run from cache). The Owner observes progress by re-reading
 // the Project (buildState/buildError). Must be mounted behind RequireOwner with an {id}
 // path value. 404 if the Project is not theirs, 501 if publishing is not configured (no
-// GitHub App credentials), 409 if a build is already in flight, 422 if the repo is not
-// theirs / not a single repo, 202 with the 'building' view once the build is launched.
+// GitHub App credentials), 409 if a build is already in flight, 422 if any service's repo
+// is not the Owner's own, 202 with the 'building' view once the build is launched.
 func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 	owner, ok := auth.OwnerFrom(r.Context())
 	if !ok {
@@ -251,9 +252,9 @@ func (h *Handlers) Publish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// Security: an Owner may only publish their OWN repositories, and (MVP) every service
-	// must come from one repository so a single commit pins the whole Project. Checked
-	// before marking the build started, so a rejected repo never enters 'building'.
+	// Security: an Owner may only publish their OWN repositories; services may span several
+	// of the Owner's repos, each pinned to its own resolved commit (#50). Checked before
+	// marking the build started, so a rejected repo never enters 'building'.
 	if err := checkOwnerRepos(owner.GitHubLogin, m); err != nil {
 		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -317,12 +318,13 @@ func (h *Handlers) Portfolio(w http.ResponseWriter, r *http.Request) {
 }
 
 // checkOwnerRepos enforces that every service's repo is the signed-in Owner's own
-// (parsed owner == their GitHub login) and that all services share a single repo
-// (MVP: one commit pins the whole Project). Both are publish preconditions surfaced
-// to the Owner as 422. Cross-owner public repos are rejected here, since the
-// installation-token boundary only stops PRIVATE repos.
+// (parsed owner == their GitHub login). A Project's services MAY now span multiple repos
+// (#50: each service is pinned to its own repo's commit), so there is no longer a
+// single-repo restriction — only the ownership check. It is a publish precondition
+// surfaced to the Owner as 422. Cross-owner public repos are rejected here, since the
+// installation-token boundary only stops PRIVATE repos; relaxing owner==login to allow
+// org repos the Owner has access to is the next slice (a deliberate access gate).
 func checkOwnerRepos(ownerLogin string, m runcontract.Manifest) error {
-	var first string
 	for _, svc := range m.Services {
 		owner, repo, err := githubapp.ParseRepo(svc.Repo)
 		if err != nil {
@@ -330,13 +332,6 @@ func checkOwnerRepos(ownerLogin string, m runcontract.Manifest) error {
 		}
 		if !strings.EqualFold(owner, ownerLogin) {
 			return fmt.Errorf("service %q: %s/%s is not your repository — you can only publish repos you own", svc.Name, owner, repo)
-		}
-		key := strings.ToLower(owner + "/" + repo)
-		switch {
-		case first == "":
-			first = key
-		case key != first:
-			return fmt.Errorf("all services must come from one repository for now (found %s and %s)", first, key)
 		}
 	}
 	return nil
