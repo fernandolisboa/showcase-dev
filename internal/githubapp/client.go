@@ -1,10 +1,12 @@
-// Package githubapp mints short-lived GitHub App installation access tokens and
-// uses them to clone an Owner's repo at publish (#19, ADR-0008). The App's own
-// credentials — a numeric App ID and an RSA private key — sign a short-lived JWT;
-// that JWT mints an installation token SCOPED to a single repo with contents:read
-// (least privilege). The token lives only in memory, is handed to git via an
-// env-provided auth header (never the URL, never argv), and never reaches a build
-// context (the clone strips .git). Tokens are never persisted or logged.
+// Package githubapp mints short-lived GitHub App installation access tokens and uses them
+// to clone an Owner's repo at publish (#19, ADR-0008) and to verify an Owner's access to a
+// repo they do not own outright (#50, the org-repo publish gate). The App's own
+// credentials — a numeric App ID and an RSA private key — sign a short-lived JWT; that JWT
+// mints an installation token SCOPED to a single repo with least privilege PER CALL:
+// contents:read to clone, metadata:read to read a user's repository permission. The token
+// lives only in memory, is handed to git via an env-provided auth header (never the URL,
+// never argv), and never reaches a build context (the clone strips .git). Tokens are never
+// persisted or logged.
 package githubapp
 
 import (
@@ -95,6 +97,13 @@ func (c *Client) appJWT() (string, error) {
 // InstallationToken returns a short-lived token scoped to owner/repo with
 // contents:read. A repo with no installation for this App yields ErrNoInstallation.
 func (c *Client) InstallationToken(ctx context.Context, owner, repo string) (string, time.Time, error) {
+	return c.mintToken(ctx, owner, repo, `"contents":"read"`)
+}
+
+// mintToken mints a short-lived installation token scoped to owner/repo with exactly the
+// given permissions (a JSON fragment like `"contents":"read"`) — least privilege per call.
+// A repo with no installation for this App yields ErrNoInstallation.
+func (c *Client) mintToken(ctx context.Context, owner, repo, perms string) (string, time.Time, error) {
 	jwt, err := c.appJWT()
 	if err != nil {
 		return "", time.Time{}, err
@@ -103,8 +112,7 @@ func (c *Client) InstallationToken(ctx context.Context, owner, repo string) (str
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	// Scope the token to just this repo with read-only contents — least privilege.
-	body := fmt.Sprintf(`{"repositories":[%q],"permissions":{"contents":"read"}}`, repo)
+	body := fmt.Sprintf(`{"repositories":[%q],"permissions":{%s}}`, repo, perms)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("%s/app/installations/%d/access_tokens", c.apiBase, instID), strings.NewReader(body))
 	if err != nil {
@@ -130,6 +138,58 @@ func (c *Client) InstallationToken(ctx context.Context, owner, repo string) (str
 		return "", time.Time{}, errors.New("mint installation token: empty token")
 	}
 	return out.Token, out.ExpiresAt, nil
+}
+
+// HasRepoAccess reports whether username has at least read access to owner/repo, verified
+// through the App installation (#50). It mints a metadata:read installation token — which
+// requires the App be installed on the repo (ErrNoInstallation otherwise, the reachability
+// gate) — and reads the user's repository permission via the collaborators API. A true
+// result therefore means BOTH the platform can reach the repo AND the signed-in Owner is
+// entitled to publish it, which is what lets an Owner build an org repo they have access to
+// without owning it outright.
+func (c *Client) HasRepoAccess(ctx context.Context, owner, repo, username string) (bool, error) {
+	tok, _, err := c.mintToken(ctx, owner, repo, `"metadata":"read"`)
+	if err != nil {
+		return false, err
+	}
+	perm, err := c.repoPermission(ctx, owner, repo, username, tok)
+	if err != nil {
+		return false, err
+	}
+	return perm != "" && perm != "none", nil
+}
+
+// repoPermission returns username's permission on owner/repo (admin|write|read|none) via
+// the collaborators API (which needs only metadata:read). A user who is not a collaborator
+// is reported as "none" (the API 404s for one on some repos), so the caller treats both
+// "none" and a 404 as "no access".
+func (c *Client) repoPermission(ctx context.Context, owner, repo, username, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/repos/%s/%s/collaborators/%s/permission", c.apiBase, owner, repo, username), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("check repo permission: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "none", nil // not a collaborator / no access
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("check repo permission: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Permission string `json:"permission"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode repo permission: %w", err)
+	}
+	return out.Permission, nil
 }
 
 // repoInstallationID finds the installation that grants the App access to owner/repo.

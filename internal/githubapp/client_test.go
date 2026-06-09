@@ -89,6 +89,85 @@ func TestInstallationTokenHappyPath(t *testing.T) {
 	}
 }
 
+// accessServer mocks the App API for HasRepoAccess: installation lookup, a metadata:read
+// token mint, and the collaborator-permission endpoint returning perm (or 404 if perm=="").
+func accessServer(t *testing.T, perm string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/acme/app/installation":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 7})
+		case r.URL.Path == "/app/installations/7/access_tokens":
+			var body struct {
+				Permissions map[string]string `json:"permissions"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Permissions["metadata"] != "read" || len(body.Permissions) != 1 {
+				t.Errorf("access check token not scoped to metadata:read, got %+v", body.Permissions)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "ghs_meta", "expires_at": "2099-01-01T00:00:00Z"})
+		case r.URL.Path == "/repos/acme/app/collaborators/alice/permission":
+			if perm == "" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"permission": perm})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestHasRepoAccess(t *testing.T) {
+	cases := []struct {
+		name string
+		perm string
+		want bool
+	}{
+		{"admin", "admin", true},
+		{"write", "write", true},
+		{"read", "read", true},
+		{"none", "none", false},
+		{"not a collaborator (404)", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := accessServer(t, tc.perm)
+			defer srv.Close()
+			c, err := New("123456", testKeyPEM(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.apiBase = srv.URL
+
+			got, err := c.HasRepoAccess(context.Background(), "acme", "app", "alice")
+			if err != nil {
+				t.Fatalf("HasRepoAccess: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("HasRepoAccess(perm=%q) = %v, want %v", tc.perm, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHasRepoAccessNoInstallation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // installation lookup 404s
+	}))
+	defer srv.Close()
+	c, err := New("123456", testKeyPEM(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.apiBase = srv.URL
+
+	if _, err := c.HasRepoAccess(context.Background(), "acme", "app", "alice"); !errors.Is(err, ErrNoInstallation) {
+		t.Fatalf("HasRepoAccess without an installation = %v, want ErrNoInstallation", err)
+	}
+}
+
 func TestInstallationTokenNoInstallation(t *testing.T) {
 	// A repo the App is not installed on returns 404 on discovery.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

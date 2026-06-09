@@ -268,7 +268,13 @@ func main() {
 		if pb != nil {
 			publisher = project.NewPublisher(dbStore, pb, logger)
 		}
-		projects = project.NewHandlers(dbStore, publisher)
+		// With the GitHub App, an Owner may also publish org repos they have access to
+		// (#50), gated by verifying their repository permission through the installation.
+		var projectOpts []project.HandlerOption
+		if ghClient != nil {
+			projectOpts = append(projectOpts, project.WithRepoAccess(ghClient))
+		}
+		projects = project.NewHandlers(dbStore, publisher, projectOpts...)
 	}
 
 	// The Runner boots Sessions and keeps the proxy registry current; the session
